@@ -1,0 +1,17 @@
+{
+  "name": "Piano alimentare",
+  "short_name": "Piano",
+  "description": "Segui il piano alimentare pasto dopo pasto, con macro sempre in vista.",
+  "lang": "it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1218",
+  "theme_color": "#0f1218",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
