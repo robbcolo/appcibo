@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.1.0';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
@@ -24,7 +24,7 @@ const todayKey = () => dkey(new Date());
 const pk = k => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d, 12); };
 const addDays = (k, n) => { const d = pk(k); d.setDate(d.getDate() + n); return dkey(d); };
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
-const dateSub = k => pk(k).toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'long' });
+const dateSub = (k, short) => pk(k).toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: short ? 'short' : 'long' });
 const dateLong = k => cap(pk(k).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' }));
 function dateMain(k) {
   const t = todayKey();
@@ -77,11 +77,11 @@ function dayTarget(d) {
 }
 const defType = k => S.settings.weekly[(pk(k).getDay() + 6) % 7] ? 'training' : 'rest';
 const newDay = k => ({ date: k, type: defType(k), meals: [], activities: [], water: 0, supp: { whey: false, creatine: false }, targetOverride: null });
-const V = { date: todayKey(), tab: 'oggi', open: {}, weightDate: null };
+const V = { date: todayKey(), tab: 'oggi', open: {}, weightDate: null, openMeals: {}, lastMeal: null };
 const cur = () => S.days[V.date] || newDay(V.date);
 const ensure = (k = V.date) => S.days[k] || (S.days[k] = newDay(k));
 function mut(fn) { const d = ensure(); fn(d); save(); render(); }
-const dayHasData = d => d && (d.meals.some(m => m.items.length) || d.activities.length || d.water > 0 || d.supp.whey || d.supp.creatine);
+const dayHasData = d => d && (d.meals.some(m => m.items.length) || d.activities.length || d.supp.whey || d.supp.creatine);
 const findMeal = (d, id) => d.meals.find(m => m.id === id);
 
 /* ===================== Catalogo ===================== */
@@ -173,7 +173,7 @@ function renderRecap() {
     <div class="r-date-mini">${esc(dateMain(V.date))} · ${esc(dateSub(V.date))} · ${training ? 'Allenamento' : 'Riposo'}</div>
     <div class="r-nav">
       <button class="icon-btn" data-act="prevDay" aria-label="Giorno precedente"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
-      <label class="r-date"><span class="r-date-main">${esc(dateMain(V.date))}</span><span class="r-date-sub">${esc(dateSub(V.date))}</span><input class="r-date-input" type="date" value="${V.date}" data-act-change="pickDate" aria-label="Scegli la data"></label>
+      <label class="r-date"><span class="r-date-main">${esc(dateMain(V.date))}</span><span class="r-date-sub">${esc(dateSub(V.date, window.innerWidth < 420))}</span><input class="r-date-input" type="date" value="${V.date}" data-act-change="pickDate" aria-label="Scegli la data"></label>
       <button class="icon-btn" data-act="nextDay" aria-label="Giorno successivo"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
       <button class="type-chip ${training ? 'training' : ''}" data-act="toggleType" aria-label="Cambia tipo di giorno">${training ? 'Allenamento' : 'Riposo'}</button>
     </div>
@@ -201,11 +201,25 @@ function measureRecap() {
   if (!r.classList.contains('compact')) document.documentElement.style.setProperty('--recap-full', r.offsetHeight + 'px');
   document.documentElement.style.setProperty('--recap-h', r.offsetHeight + 'px');
 }
+function updateFab() {
+  const fab = $('#fab'); if (!fab) return;
+  let show = V.tab === 'oggi' && SHEETS.length === 0;
+  if (show) {
+    const nb = $('#view [data-act="newMeal"]');
+    if (nb) {
+      const r = nb.getBoundingClientRect();
+      const top = $('#recap').getBoundingClientRect().bottom, bottom = $('#tabbar').getBoundingClientRect().top;
+      show = !(r.bottom > top + 6 && r.top < bottom - 6);
+    } else show = false;
+  }
+  fab.classList.toggle('on', show); document.body.classList.toggle('fab-on', show);
+}
 function setCompact() {
   const open = SHEETS.length > 0;
   const r = $('#recap');
   const want = open || (r.classList.contains('compact') ? window.scrollY > 20 : window.scrollY > 70);
   if (want !== r.classList.contains('compact')) { r.classList.toggle('compact', want); measureRecap(); }
+  updateFab();
 }
 function topPreview() { const s = SHEETS[SHEETS.length - 1]; return s ? (s.preview || null) : null; }
 function refreshPreview() { preview = topPreview(); renderRecap(); }
@@ -231,27 +245,35 @@ function itemRow(m, it) {
     <div><div class="item-name">${esc(it.name)}</div><div class="item-qty">${esc(qtyText(it))}${it.note ? ' · ' + esc(it.note) : ''}${tag}</div></div>
     <div class="item-m">${f0(mc.kcal)} kcal<small>P ${f1(mc.p)} · C ${f1(mc.c)} · G ${f1(mc.f)}</small></div></button>`;
 }
+const CHEV = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+const DOTS = '<svg viewBox="0 0 24 24" aria-hidden="true" style="width:26px;height:26px;fill:currentColor"><circle cx="5.5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="18.5" cy="12" r="1.9"/></svg>';
+function mealSub(m, open) {
+  const tm = m.time ? m.time + ' · ' : '';
+  if (!m.items.length) return tm + 'Vuoto';
+  if (open) return tm + m.items.length + (m.items.length === 1 ? ' alimento' : ' alimenti');
+  const seen = new Set(), names = [];
+  m.items.forEach(it => { const n = it.dishName || it.name; if (!seen.has(n)) { seen.add(n); names.push(n); } });
+  return tm + names.join(', ');
+}
 function mealCard(m) {
-  const t = sumItems(m.items);
+  const t = sumItems(m.items), open = !!V.openMeals[m.id];
   const body = groupItems(m.items).map(g => {
     if (!g.key) return g.items.map(it => itemRow(m, it)).join('');
     const gt = sumItems(g.items);
     return `<div class="dish"><button class="dish-head" data-act="editDish" data-meal="${m.id}" data-key="${g.key}"><span class="dish-name">${esc(g.name)}</span><span class="dish-sum">${f0(gt.kcal)} kcal</span><span class="muted">›</span></button>${g.items.map(it => itemRow(m, it)).join('')}</div>`;
   }).join('');
-  return `<section class="meal"><button class="meal-head" data-act="editMeal" data-id="${m.id}">
-      <div><h3>${esc(m.name)}</h3>${m.time ? `<span class="meal-time">${esc(m.time)}</span>` : '<span class="meal-time">Tocca per rinominare</span>'}</div>
-      <div class="meal-sum">${f0(t.kcal)} kcal<small>P ${f0(t.p)} g</small></div></button>
-    <div class="items">${body}</div>
-    <button class="btn add" data-act="addTo" data-meal="${m.id}">+ Aggiungi alimento</button></section>`;
+  return `<section class="meal${open ? ' open' : ''}">
+    <button class="meal-head" data-act="toggleMeal" data-id="${m.id}" aria-expanded="${open}" aria-label="${esc(m.name)}: apri o chiudi">
+      <div class="mh-l"><h3>${esc(m.name)}</h3><span class="meal-time">${esc(mealSub(m, open))}</span></div>
+      <div class="meal-sum">${f0(t.kcal)} kcal<small>P ${f0(t.p)} g</small></div>${CHEV}</button>
+    <div class="meal-body"><div class="mb-in"><div class="items">${body}</div>
+      <div class="meal-actions"><button class="btn add" data-act="addTo" data-meal="${m.id}">+ Aggiungi alimento</button><button class="btn opt" data-act="editMeal" data-id="${m.id}" aria-label="Opzioni del pasto">${DOTS}</button></div></div></div></section>`;
 }
 function dayCard(d) {
   const tg = dayTarget(d);
   const acts = d.activities.map(a => `<div class="act-row"><div><b>${esc(a.name)}</b><div class="muted" style="font-size:14px">${f0(a.kcal)} kcal${a.min ? ' · ' + a.min + ' min' : ''}</div></div><button class="btn sm danger" data-act="delActivity" data-id="${a.id}">Rimuovi</button></div>`).join('');
   const tgTxt = `${f0(tg.base.kcal)} kcal · P ${f0(tg.base.p)} · C ${f0(tg.base.c)} · G ${f0(tg.base.f)}`;
   return `<section class="card">
-    <h3>Acqua</h3>
-    <div class="row" style="margin-top:8px"><div class="stepper"><button data-act="water" data-d="-1" aria-label="Meno acqua">−</button><div class="val">${fw(d.water)} L</div><button data-act="water" data-d="1" aria-label="Più acqua">+</button></div><span class="muted">obiettivo ${fw(S.settings.waterGoal)} L</span></div>
-    <div class="sep"></div>
     <h3>Integratori</h3>
     <div class="row" style="margin-top:8px;gap:10px"><button class="toggle ${d.supp.whey ? 'on' : ''}" style="flex:1" data-act="supp" data-k="whey">${d.supp.whey ? '✓ ' : ''}Whey</button><button class="toggle ${d.supp.creatine ? 'on' : ''}" style="flex:1" data-act="supp" data-k="creatine">${d.supp.creatine ? '✓ ' : ''}Creatina</button></div>
     <div class="sep"></div>
@@ -273,6 +295,8 @@ function viewOggi() {
     h += `<section class="card empty"><h3>Giornata vuota</h3><p>Crea i pasti come vuoi tu, oppure parti da una giornata tipo.</p>
       <div class="stack"><button class="btn primary" data-act="newMeal">+ Nuovo pasto</button><button class="btn" data-act="templates">Applica una giornata tipo</button><button class="btn ghost" data-act="copyDay">Copia da un altro giorno</button></div></section>`;
   } else {
+    const allOpen = d.meals.every(m => V.openMeals[m.id]);
+    if (d.meals.length > 1) h += `<div class="meals-tools"><span>${d.meals.length} pasti</span><button data-act="toggleAll">${allOpen ? 'Chiudi tutti' : 'Apri tutti'}</button></div>`;
     h += d.meals.map(mealCard).join('');
     h += `<div class="stack" style="margin-bottom:14px"><button class="btn primary" data-act="newMeal">+ Nuovo pasto</button><div class="btn-row"><button class="btn" data-act="templates">Giornata tipo</button><button class="btn" data-act="copyDay">Copia da…</button></div></div>`;
   }
@@ -310,7 +334,6 @@ function dayDetail(d) {
   }).join('');
   const extra = [];
   if (d.activities.length) extra.push('Attività: ' + d.activities.map(a => `${a.name} ${f0(a.kcal)} kcal`).join(', '));
-  if (d.water) extra.push('Acqua: ' + f1(d.water) + ' L');
   const sup = [d.supp.whey && 'whey', d.supp.creatine && 'creatina'].filter(Boolean);
   if (sup.length) extra.push('Integratori: ' + sup.join(', '));
   return `<div class="day-detail">${meals}${extra.length ? `<p class="hint">${extra.map(esc).join('<br>')}</p>` : ''}
@@ -416,7 +439,7 @@ function viewAltro() {
   h += `<section class="card"><h3>Attività extra</h3><p class="sub">Quanta parte delle kcal stimate di padel e simili aggiungi al target del giorno.</p>
     <div class="row"><input type="range" min="0" max="100" step="10" value="${st.activityPct}" data-set-range="activityPct" style="flex:1"><b class="num" style="min-width:52px;text-align:right" id="actPctVal">${st.activityPct}%</b></div>
     <p class="hint">Le stime di calorie dell'attività sono imprecise (spesso per eccesso): con 50% sei prudente. Le kcal in più vengono aggiunte come carboidrati.</p></section>`;
-  h += `<section class="card"><h3>Peso e acqua</h3><div class="grid2">${fld('Peso di partenza (kg)', 'startWeight', st.startWeight, 'decimal')}${fld('Acqua (litri al giorno)', 'waterGoal', st.waterGoal, 'decimal')}</div></section>`;
+  h += `<section class="card"><h3>Peso di partenza</h3><p class="sub">Serve per il grafico del peso.</p>${fld('Peso di partenza (kg)', 'startWeight', st.startWeight, 'decimal')}</section>`;
   h += `<section class="card"><h3>I miei alimenti</h3><p class="sub">Alimenti extra e prodotti salvati dalla ricerca online.</p>
     ${S.custom.length ? `<div class="mlist">${S.custom.map(f => `<div class="act-row"><div><b>${esc(f.name)}</b><div class="muted" style="font-size:14px">${f.kind === 'g' ? 'per 100 g: ' : 'a porzione: '}${f0(f.per.kcal)} kcal · P ${f1(f.per.p)} · C ${f1(f.per.c)} · G ${f1(f.per.f)}</div></div><div style="display:flex;gap:6px"><button class="btn sm" data-act="editCustom" data-id="${f.id}">Modifica</button><button class="btn sm danger" data-act="delCustom" data-id="${f.id}">✕</button></div></div>`).join('')}</div>` : '<p class="muted">Nessun alimento salvato.</p>'}
     <button class="btn" style="margin-top:10px" data-act="newCustom">+ Nuovo alimento</button></section>`;
@@ -436,6 +459,7 @@ function renderView() {
   const fn = { oggi: viewOggi, storico: viewStorico, peso: viewPeso, altro: viewAltro }[V.tab];
   $('#view').innerHTML = fn();
   $$('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === V.tab));
+  updateFab();
 }
 function render() { renderRecap(); renderView(); }
 function setTab(t) { V.tab = t; renderView(); window.scrollTo(0, 0); setCompact(); }
@@ -759,6 +783,7 @@ function openNewMeal(onCreate) {
       const name = nm.value.trim() || ('Pasto ' + (d.meals.length + 1));
       const id = uid(), time = $('.tm-in', sh.body).value;
       sh.close();
+      V.openMeals[id] = true; V.lastMeal = id;
       mut(dd => dd.meals.push({ id, name, time, items: [] }));
       (onCreate || openPicker)(id);
     },
@@ -960,7 +985,7 @@ async function offSearch(q) {
 /* ===================== Selettore alimenti ===================== */
 function openPicker(mealId) {
   const P = { meal: mealId, tab: 'alimenti', cat: 'Tutti', venue: null, dcat: 'Tutti', q: '', dq: '', added: 0, off: { q: '', res: null, busy: false, err: '' } };
-  const sh = openSheet('Aggiungi alimenti');
+  const sh = openSheet('Aggiungi alimenti', { onClose: () => { if (P.added) { V.openMeals[P.meal] = true; V.lastMeal = P.meal; renderView(); } } });
   sh.body.innerHTML = '<div class="max"><div class="chips scroll p-target" style="margin-bottom:8px"></div><div class="seg p-tabs"></div><div class="p-ctl" style="margin-top:12px"></div><div class="p-list"></div></div>';
   const T = $('.p-target', sh.body), TB = $('.p-tabs', sh.body), CT = $('.p-ctl', sh.body), LS = $('.p-list', sh.body);
   const TABS = [['alimenti', 'Alimenti'], ['piatti', 'Piatti'], ['salvati', 'Salvati'], ['online', 'Online'], ['extra', 'Extra']];
@@ -1134,9 +1159,65 @@ async function updateApp() {
 
 /* ===================== Azioni (tocchi nella pagina) ===================== */
 function setPath(path, v) { const parts = path.split('.'); let o = S.settings; while (parts.length > 1) o = o[parts.shift()]; o[parts[0]] = v; }
+function changeDay(dir) {
+  V.date = addDays(V.date, dir); V.open = {}; render(); window.scrollTo(0, 0);
+  const v = $('#view'); v.style.transition = ''; v.style.transform = ''; v.style.opacity = '';
+  if (v.animate) v.animate([{ transform: `translateX(${dir * 46}px)`, opacity: .15 }, { transform: 'translateX(0)', opacity: 1 }], { duration: 240, easing: 'cubic-bezier(.2,.8,.2,1)' });
+  updateFab();
+}
+function fabAdd() {
+  const d = cur();
+  if (!d.meals.length) return openNewMeal();
+  const id = V.lastMeal && findMeal(d, V.lastMeal) ? V.lastMeal : d.meals[d.meals.length - 1].id;
+  openPicker(id);
+}
+function initSwipe() {
+  const view = $('#view');
+  let sw = null;
+  const blocked = e => V.tab !== 'oggi' || SHEETS.length > 0 || document.querySelector('.dlg-back') || e.touches.length !== 1;
+  document.addEventListener('touchstart', e => {
+    if (blocked(e)) { sw = null; return; }
+    const t = e.touches[0];
+    if (t.clientX < 24 || t.clientX > window.innerWidth - 24) { sw = null; return; }
+    if (e.target.closest('input, textarea, select, #tabbar, #fab, .chips.scroll')) { sw = null; return; }
+    sw = { x: t.clientX, y: t.clientY, t: Date.now(), dx: 0, active: false, dead: false };
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    if (!sw || sw.dead) return;
+    const t = e.touches[0], dx = t.clientX - sw.x, dy = t.clientY - sw.y;
+    if (!sw.active) {
+      if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { sw.dead = true; return; }
+      if (Math.abs(dx) > 16 && Math.abs(dx) > Math.abs(dy) * 1.5) sw.active = true; else return;
+    }
+    sw.dx = dx;
+    view.style.transition = 'none';
+    view.style.transform = `translateX(${dx * 0.4}px)`;
+    view.style.opacity = String(1 - Math.min(Math.abs(dx) / 600, 0.4));
+  }, { passive: true });
+  const end = (cancel) => {
+    if (!sw || !sw.active) { sw = null; return; }
+    const dx = sw.dx, dt = Date.now() - sw.t; sw = null;
+    const go = !cancel && (Math.abs(dx) > 70 || (Math.abs(dx) > 40 && dt < 260));
+    if (go) { changeDay(dx < 0 ? 1 : -1); return; }
+    view.style.transition = 'transform .22s ease, opacity .22s ease'; view.style.transform = ''; view.style.opacity = '';
+    setTimeout(() => { view.style.transition = ''; }, 260);
+  };
+  document.addEventListener('touchend', () => end(false), { passive: true });
+  document.addEventListener('touchcancel', () => end(true), { passive: true });
+}
 const A = {
-  prevDay() { V.date = addDays(V.date, -1); V.open = {}; render(); window.scrollTo(0, 0); },
-  nextDay() { V.date = addDays(V.date, 1); V.open = {}; render(); window.scrollTo(0, 0); },
+  prevDay() { changeDay(-1); },
+  nextDay() { changeDay(1); },
+  toggleMeal(el) {
+    const id = el.dataset.id, m = findMeal(cur(), id); if (!m) return;
+    const open = !V.openMeals[id]; V.openMeals[id] = open; if (open) V.lastMeal = id;
+    const sec = el.closest('.meal'); sec.classList.toggle('open', open); el.setAttribute('aria-expanded', open);
+    $('.meal-time', sec).textContent = mealSub(m, open);
+    const all = $('[data-act="toggleAll"]'); if (all) all.textContent = cur().meals.every(x => V.openMeals[x.id]) ? 'Chiudi tutti' : 'Apri tutti';
+    setTimeout(updateFab, 300);
+  },
+  toggleAll() { const d = cur(), open = !d.meals.every(m => V.openMeals[m.id]); d.meals.forEach(m => { V.openMeals[m.id] = open; }); renderView(); },
+  fab() { fabAdd(); },
   toggleType() { mut(d => { d.type = d.type === 'training' ? 'rest' : 'training'; }); toast(cur().type === 'training' ? 'Giorno di allenamento' : 'Giorno di riposo'); },
   newMeal() { openNewMeal(); },
   addTo(el) { openPicker(el.dataset.meal); },
@@ -1151,7 +1232,6 @@ const A = {
   editDish(el) { openDish({ mode: 'edit', mealId: el.dataset.meal, key: el.dataset.key }); },
   templates() { openTemplates(); },
   copyDay() { openCopyDay(); },
-  water(el) { mut(d => { d.water = Math.max(0, r2(d.water + num(el.dataset.d) * 0.25)); }); },
   supp(el) { mut(d => { d.supp[el.dataset.k] = !d.supp[el.dataset.k]; }); },
   addActivity() { openActivity(); },
   delActivity(el) { mut(d => { d.activities = d.activities.filter(a => a.id !== el.dataset.id); }); },
@@ -1228,6 +1308,8 @@ function init() {
     if (t.dataset && t.dataset.setRange) { S.settings[t.dataset.setRange] = +t.value; const l = $('#actPctVal'); if (l) l.textContent = t.value + '%'; save(); renderRecap(); }
     if (t.id === 'wInput') V.weightVal = num(t.value);
   });
+  $('#fab').addEventListener('click', fabAdd);
+  initSwipe();
   $('#tabbar').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) setTab(b.dataset.tab); });
   let tick = false;
   window.addEventListener('scroll', () => { if (tick) return; tick = true; requestAnimationFrame(() => { tick = false; setCompact(); }); }, { passive: true });
@@ -1238,9 +1320,11 @@ function init() {
     else { const t = todayKey(); if (t !== V.lastToday) { if (V.date === V.lastToday) V.date = t; V.lastToday = t; render(); } }
   });
   window.addEventListener('pagehide', persist);
+  window.addEventListener('resize', updateFab);
   render();
   try { if (!localStorage.getItem(KEY)) persist(); } catch (e) { }
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { }
+  try { if (!localStorage.getItem('piano-hint-swipe')) { localStorage.setItem('piano-hint-swipe', '1'); setTimeout(() => toast('Scorri a destra o a sinistra per cambiare giorno'), 1400); } } catch (e) { }
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => { });
   if (/[?&]debug\b/.test(location.search)) window.__app = { get S() { return S; }, V, A, SHEETS };
 }
