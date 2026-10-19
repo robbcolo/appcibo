@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.1.2';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
@@ -26,6 +26,7 @@ const addDays = (k, n) => { const d = pk(k); d.setDate(d.getDate() + n); return 
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const dateSub = (k, short) => pk(k).toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: short ? 'short' : 'long' });
 const dateLong = k => cap(pk(k).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' }));
+const dateMid = k => cap(pk(k).toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'short' }).replace(/\.$/, ''));
 function dateMain(k) {
   const t = todayKey();
   if (k === t) return 'Oggi';
@@ -37,9 +38,12 @@ function dateMain(k) {
 /* ===================== Archivio dati ===================== */
 const defaults = () => ({
   v: 1,
-  settings: { targets: { kcal: 2200, p: 155, c: 265, f: 55 }, phase: 'minicut', weekly: [1, 0, 1, 0, 1, 1, 0], activityPct: 50, startWeight: 68.5, waterGoal: 2.5, lastBackup: 0 },
+  settings: { targets: { kcal: 2200, p: 155, c: 265, f: 55 }, phase: 'minicut', weekly: [1, 0, 1, 0, 1, 1, 0], activityPct: 50, startWeight: 68.5, waterGoal: 2.5, lastBackup: 0, mealsSeeded: true },
   days: {}, custom: [], saved: [], recents: {}, weights: [{ date: '2026-10-19', kg: 67 }], created: Date.now(),
 });
+/* Ogni giorno parte con i pasti principali già pronti (vuoti): se ne salti uno basta non toccarlo, se ne aggiungi uno lo crei tu. */
+const DEFAULT_MEALS = ['Colazione', 'Pranzo', 'Merenda', 'Cena'];
+const defMeals = () => DEFAULT_MEALS.map(n => ({ id: uid(), name: n, time: '', items: [] }));
 let storageOK = true;
 function load() {
   const d = defaults();
@@ -47,7 +51,12 @@ function load() {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const o = JSON.parse(raw);
-      return { ...d, ...o, settings: { ...d.settings, ...(o.settings || {}), targets: { ...d.settings.targets, ...((o.settings || {}).targets || {}) } } };
+      const out = { ...d, ...o, settings: { ...d.settings, ...(o.settings || {}), targets: { ...d.settings.targets, ...((o.settings || {}).targets || {}) } } };
+      if (!(o.settings && o.settings.mealsSeeded)) { /* una tantum: i giorni già salvati ma senza pasti ricevono Colazione, Pranzo, Merenda, Cena */
+        Object.values(out.days || {}).forEach(day => { if (day && Array.isArray(day.meals) && !day.meals.length) day.meals = defMeals(); });
+        out.settings.mealsSeeded = true;
+      }
+      return out;
     }
   } catch (e) { console.warn('Lettura archivio fallita', e); storageOK = false; }
   return d;
@@ -76,10 +85,16 @@ function dayTarget(d) {
   return { kcal: base.kcal + extra, p: base.p, c: base.c + extra / 4, f: base.f, extra, base };
 }
 const defType = k => S.settings.weekly[(pk(k).getDay() + 6) % 7] ? 'training' : 'rest';
-const newDay = k => ({ date: k, type: defType(k), meals: [], activities: [], water: 0, supp: { whey: false, creatine: false }, targetOverride: null });
+const newDay = k => ({ date: k, type: defType(k), meals: defMeals(), activities: [], water: 0, supp: { whey: false, creatine: false }, targetOverride: null });
 const V = { date: todayKey(), tab: 'oggi', open: {}, weightDate: null, openMeals: {}, lastMeal: null };
-const cur = () => S.days[V.date] || newDay(V.date);
-const ensure = (k = V.date) => S.days[k] || (S.days[k] = newDay(k));
+/* Giorno non ancora salvato: resta in "bozza" (stessi id dei pasti a ogni lettura) finché non ci scrivi qualcosa. */
+let draftDay = null;
+const cur = () => S.days[V.date] || (draftDay && draftDay.date === V.date ? draftDay : (draftDay = newDay(V.date)));
+const ensure = (k = V.date) => {
+  if (S.days[k]) return S.days[k];
+  let d; if (draftDay && draftDay.date === k) { d = draftDay; draftDay = null; } else d = newDay(k);
+  return (S.days[k] = d);
+};
 function mut(fn) { const d = ensure(); fn(d); save(); render(); }
 const dayHasData = d => d && (d.meals.some(m => m.items.length) || d.activities.length || d.supp.whey || d.supp.creatine);
 const findMeal = (d, id) => d.meals.find(m => m.id === id);
@@ -196,11 +211,21 @@ function renderRecap() {
     </div>`;
   measureRecap();
 }
-let lastRecapH = -1, lastRecapFull = -1;
-function measureRecap() {
-  const r = $('#recap'), h = r.offsetHeight, st = document.documentElement.style;
-  if (!r.classList.contains('compact') && h !== lastRecapFull) { lastRecapFull = h; st.setProperty('--recap-full', h + 'px'); }
-  if (h !== lastRecapH) { lastRecapH = h; st.setProperty('--recap-h', h + 'px'); }
+/* Altezza del riepilogo: misuro solo il contenuto (senza padding). Il padding dipende dalla safe-area ed è
+   calcolato dal CSS, così resta giusto anche se l'area sicura cambia dopo la ripresa dell'app. */
+const recapSeen = {};
+function measureRecap(force) {
+  const r = $('#recap'); if (!r) return;
+  const cs = getComputedStyle(r), st = document.documentElement.style;
+  const core = () => r.offsetHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - parseFloat(cs.borderBottomWidth);
+  const put = (name, v) => { if (v > 0 && Math.abs((recapSeen[name] || -1) - v) > 0.5) { recapSeen[name] = v; st.setProperty(name, v + 'px'); } };
+  const compact = r.classList.contains('compact');
+  put(compact ? '--recap-core-c' : '--recap-core', core());
+  if (force) { /* misura anche l'altro stato, senza che si veda (nessun disegno tra i due passaggi) */
+    r.classList.toggle('compact', !compact);
+    put(compact ? '--recap-core' : '--recap-core-c', core());
+    r.classList.toggle('compact', compact);
+  }
 }
 function updateFab() {
   const fab = $('#fab'); if (!fab) return;
@@ -347,7 +372,7 @@ function viewStorico() {
   const last7 = keys.slice(0, 7), a7 = avgOf(last7);
   const k30 = keys.filter(k => k >= addDays(todayKey(), -30));
   const tr = avgOf(k30.filter(k => S.days[k].type === 'training')), rs = avgOf(k30.filter(k => S.days[k].type !== 'training'));
-  const stat = (lab, a, sub) => a ? `<div class="stat"><span>${lab}</span><b>${f0(a.kcal)} kcal</b><small>P ${f0(a.p)} · C ${f0(a.c)} · G ${f0(a.f)}<br>${sub}</small></div>` : `<div class="stat"><span>${lab}</span><b>–</b><small>nessun dato</small></div>`;
+  const stat = (lab, a, sub) => a ? `<div class="stat"><span>${lab}</span><b>${f0(a.kcal)} kcal</b><small><span class="nw">P ${f0(a.p)} · C ${f0(a.c)} · G ${f0(a.f)}</span><br>${sub}</small></div>` : `<div class="stat"><span>${lab}</span><b>–</b><small>nessun dato</small></div>`;
   h += `<section class="card"><h3>Medie giornaliere</h3><p class="sub">Solo i giorni con pasti registrati.</p><div class="stat-grid">
       ${stat('Ultimi ' + a7.n + (a7.n === 1 ? ' giorno' : ' giorni'), a7, 'target ' + f0(S.settings.targets.kcal) + ' kcal')}
       ${stat('Media 30 giorni, allenamento', tr, (tr ? tr.n : 0) + ((tr ? tr.n : 0) === 1 ? ' giorno' : ' giorni'))}
@@ -357,8 +382,8 @@ function viewStorico() {
   h += keys.map(k => {
     const d = S.days[k], t = dayTotals(d), tg = dayTarget(d), open = !!V.open[k];
     return `<section class="day-card"><button class="hd" data-act="toggleDay" data-date="${k}">
-      <div class="t"><b>${esc(dateLong(k))}</b><span class="pill ${d.type === 'training' ? 'training' : ''}">${d.type === 'training' ? 'Allenamento' : 'Riposo'}</span></div>
-      <div class="mini-bars">${mbar('m-k', 'Kcal', t.kcal, tg.kcal, 0)}${mbar('m-p', 'P', t.p, tg.p, 0, { noOver: true })}${mbar('m-c', 'C', t.c, tg.c, 0)}${mbar('m-f', 'G', t.f, tg.f, 0)}</div></button>
+      <div class="t"><b>${esc(dateMid(k))}</b><span class="pill ${d.type === 'training' ? 'training' : ''}">${d.type === 'training' ? 'Allenamento' : 'Riposo'}</span></div>
+      <div class="mini-bars">${cbar('m-k', 'Kcal', t.kcal, tg.kcal, 0)}${cbar('m-p', 'P', t.p, tg.p, 0, true)}${cbar('m-c', 'C', t.c, tg.c, 0)}${cbar('m-f', 'G', t.f, tg.f, 0)}</div></button>
       ${open ? dayDetail(d) : ''}</section>`;
   }).join('');
   return h + `<div class="stack"><button class="btn" data-act="exportCsv">Esporta i giorni in CSV</button></div>`;
@@ -555,7 +580,7 @@ function normalize(o) {
 async function applyMealsTo(destKey, newMeals, label) {
   const d0 = S.days[destKey];
   let mode = 'replace';
-  if (d0 && d0.meals.length) {
+  if (d0 && d0.meals.some(m => m.items.length)) {
     mode = await choice(label, 'Questa giornata ha già dei pasti.', [
       { label: 'Aggiungi ai pasti esistenti', value: 'add', cls: 'primary' },
       { label: 'Sostituisci tutto', value: 'replace', cls: 'danger' },
@@ -1163,44 +1188,64 @@ function setPath(path, v) { const parts = path.split('.'); let o = S.settings; w
 /* ---- Animazioni: solo transform/opacity (GPU). Niente layout né ridisegno a ogni fotogramma, così restano fluide anche a 120 Hz. ---- */
 const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 const EASE_OUT = 'cubic-bezier(.22,.8,.24,1)';
-/* Cambia lo stato (layout istantaneo) e fa scivolare gli elementi sottostanti dalla vecchia alla nuova posizione. */
+/* Cambia lo stato (layout istantaneo) e fa scivolare gli elementi sottostanti dalla vecchia alla nuova posizione.
+   Una "tenda" del colore dello sfondo scorre insieme alle card e copre i vuoti tra l'una e l'altra: il contenuto
+   del pasto si scopre (apertura) o si ricopre (chiusura, con una copia ferma del corpo) soltanto man mano,
+   senza lasciare scie. Tutto con transform: nessun ridisegno a ogni fotogramma. */
 function flipFollowers(sec, mutate, closing) {
-  const fol = []; for (let e = sec.nextElementSibling; e; e = e.nextElementSibling) fol.push(e);
+  const fol = []; for (let e = sec.nextElementSibling; e; e = e.nextElementSibling) if (!e.classList.contains('fx')) fol.push(e);
   const animate = !!sec.animate && !reduceMotion() && fol.length > 0;
-  let ghost = null, gr = null, gTop = 0;
-  if (animate && closing) { /* copia del solo corpo (senza intestazione, per non sovrapporre i testi) */
-    const bd = $('.meal-body', sec); gr = sec.getBoundingClientRect(); gTop = bd.getBoundingClientRect().top + window.scrollY - 12;
-    ghost = document.createElement('div'); ghost.className = 'meal open ghost'; ghost.appendChild(bd.cloneNode(true));
+  let ghost = null, gTop = 0;
+  if (animate && closing) { /* copia del solo corpo, ferma al suo posto finché le card non la ricoprono */
+    const bd = $('.meal-body', sec);
+    gTop = bd.getBoundingClientRect().top + window.scrollY - 12;
+    ghost = document.createElement('div'); ghost.className = 'meal open ghost fx'; ghost.appendChild(bd.cloneNode(true));
   }
   const y0 = animate ? fol[0].getBoundingClientRect().top : 0;
   mutate();
   if (!animate) { updateFab(); return; }
-  const delta = fol[0].getBoundingClientRect().top - y0;
+  const f0r = fol[0].getBoundingClientRect(), delta = f0r.top - y0;
   updateFab(); /* legge le posizioni finali: va fatto prima di avviare le animazioni */
   if (Math.abs(delta) < 2) return;
   const vh = window.innerHeight, ad = Math.abs(delta);
-  if (ghost) { /* chiusura: la vecchia card sfuma sotto gli elementi che risalgono */
-    ghost.setAttribute('aria-hidden', 'true');
-    Object.assign(ghost.style, { position: 'absolute', left: gr.left + 'px', top: gTop + 'px', width: gr.width + 'px', pointerEvents: 'none' });
-    document.body.insertBefore(ghost, $('#view'));
-    const g = ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, easing: 'ease-in' });
-    g.onfinish = g.oncancel = () => ghost.remove();
-    setTimeout(() => ghost.remove(), 600);
-  } else { /* apertura: il contenuto compare mentre gli elementi sotto scendono */
-    const inner = $('.mb-in', sec);
-    if (inner) inner.animate([{ opacity: 0, transform: 'translate3d(0,-10px,0)' }, { opacity: 1, transform: 'translate3d(0,0,0)' }], { duration: 260, easing: EASE_OUT });
+  const kf = [{ transform: `translate3d(0,${-delta}px,0)` }, { transform: 'translate3d(0,0,0)' }];
+  const opt = { duration: 280, easing: EASE_OUT };
+  const sr = sec.getBoundingClientRect(), gap = parseFloat(getComputedStyle(sec).marginBottom) || 0;
+  const fx = []; /* elementi temporanei */
+  let anchor = sec;
+  if (ghost) {
+    Object.assign(ghost.style, { position: 'absolute', left: sr.left + 'px', top: gTop + 'px', width: sr.width + 'px', pointerEvents: 'none' });
+    ghost.setAttribute('aria-hidden', 'true'); anchor.insertAdjacentElement('afterend', ghost); anchor = ghost; fx.push(ghost);
   }
+  const curtain = document.createElement('div'); curtain.className = 'fx'; curtain.setAttribute('aria-hidden', 'true');
+  Object.assign(curtain.style, { position: 'absolute', left: sr.left + 'px', width: sr.width + 'px', top: (f0r.top + window.scrollY - gap) + 'px', height: (ad + gap) + 'px', background: 'var(--bg)', pointerEvents: 'none' });
+  anchor.insertAdjacentElement('afterend', curtain); fx.push(curtain);
+  const cleanup = () => fx.forEach(n => n.remove());
+  const c = curtain.animate(kf, opt); c.onfinish = c.oncancel = cleanup;
+  setTimeout(cleanup, 700); /* rete di sicurezza */
   fol.forEach(e => {
     const r = e.getBoundingClientRect();
     if (r.top > vh + ad || r.bottom < -ad) return; /* fuori schermo: inutile animarlo */
-    e.animate([{ transform: `translate3d(0,${-delta}px,0)` }, { transform: 'translate3d(0,0,0)' }], { duration: 280, easing: EASE_OUT });
+    e.animate(kf, opt);
   });
 }
-let dayPhase = null, dayAnim = null;
-function showDay() { V.open = {}; render(); window.scrollTo(0, 0); updateFab(); }
+const FXSEL = '#view > .fx';
+let dayPhase = null, dayAnim = null, dayDirty = false, dayTimer = 0;
+function showDay() { dayDirty = false; V.open = {}; render(); window.scrollTo(0, 0); updateFab(); }
+function endDayAnim() {
+  clearTimeout(dayTimer); dayPhase = null; dayAnim = null; dayDirty = false;
+  document.body.classList.remove('busy'); const v = $('#view'); v.style.willChange = ''; v.style.transform = ''; v.style.opacity = '';
+  $$(FXSEL).forEach(n => n.remove());
+}
+/* Se l'app è stata in background (o un'animazione non è terminata) riporto tutto in uno stato pulito. */
+function resetMotion() {
+  if (document.getAnimations) document.getAnimations().forEach(a => { a.onfinish = a.oncancel = null; try { a.cancel(); } catch (e) { } });
+  const dirty = dayDirty; endDayAnim();
+  if (dirty) showDay();
+}
 /* dx0 = spostamento attuale della vista (se arrivo da un trascinamento) */
 function changeDay(dir, dx0) {
-  V.date = addDays(V.date, dir);
+  V.date = addDays(V.date, dir); dayDirty = true;
   const v = $('#view');
   if (!v.animate || reduceMotion()) { v.style.willChange = ''; showDay(); return; }
   if (dayPhase === 'out') return; /* la data è già aggiornata: la vista nuova viene disegnata a fine uscita */
@@ -1210,18 +1255,24 @@ function changeDay(dir, dx0) {
   const W = Math.min(window.innerWidth, 640) * 0.3;
   const out = v.animate([{ transform: `translate3d(${dx0 || 0}px,0,0)`, opacity: 1 }, { transform: `translate3d(${-dir * W}px,0,0)`, opacity: 0 }],
     { duration: 110, easing: 'cubic-bezier(.4,0,1,1)', fill: 'forwards' });
-  out.onfinish = () => {
+  let handled = false;
+  const afterOut = () => {
+    if (handled || dayPhase !== 'out') return; handled = true;
     showDay(); /* il contenuto è invisibile: il lavoro di disegno non si nota */
-    out.cancel();
+    out.onfinish = null; out.cancel();
     dayPhase = 'in';
     dayAnim = v.animate([{ transform: `translate3d(${dir * W}px,0,0)`, opacity: 0 }, { transform: 'translate3d(0,0,0)', opacity: 1 }], { duration: 240, easing: EASE_OUT });
-    dayAnim.onfinish = dayAnim.oncancel = () => { dayPhase = null; dayAnim = null; document.body.classList.remove('busy'); v.style.willChange = ''; };
+    dayAnim.onfinish = dayAnim.oncancel = endDayAnim;
+    clearTimeout(dayTimer); dayTimer = setTimeout(endDayAnim, 700); /* rete di sicurezza */
   };
+  out.onfinish = afterOut;
+  clearTimeout(dayTimer); dayTimer = setTimeout(afterOut, 400);
 }
 function fabAdd() {
   const d = cur();
   if (!d.meals.length) return openNewMeal();
-  const id = V.lastMeal && findMeal(d, V.lastMeal) ? V.lastMeal : d.meals[d.meals.length - 1].id;
+  const firstEmpty = d.meals.find(m => !m.items.length);
+  const id = V.lastMeal && findMeal(d, V.lastMeal) ? V.lastMeal : (firstEmpty || d.meals[d.meals.length - 1]).id;
   openPicker(id);
 }
 function initSwipe() {
@@ -1321,7 +1372,7 @@ const A = {
     if (r) { S.weights = S.weights.filter(w => w.date !== el.dataset.date); save(); renderView(); }
   },
   preset(el) { const p = D.PRESETS[el.dataset.k]; S.settings.targets = { kcal: p.kcal, p: p.p, c: p.c, f: p.f }; S.settings.phase = el.dataset.k; save(); render(); toast('Obiettivi ' + p.label); },
-  weekday(el) { const i = +el.dataset.i; S.settings.weekly[i] = S.settings.weekly[i] ? 0 : 1; save(); render(); },
+  weekday(el) { const i = +el.dataset.i; S.settings.weekly[i] = S.settings.weekly[i] ? 0 : 1; draftDay = null; save(); render(); },
   newCustom() { openCustomForm({}); },
   editCustom(el) { const f = S.custom.find(x => x.id === el.dataset.id); if (f) openCustomForm({ food: f }); },
   async delCustom(el) {
@@ -1374,14 +1425,19 @@ function init() {
   let tick = false;
   window.addEventListener('scroll', () => { if (tick) return; tick = true; requestAnimationFrame(() => { tick = false; setCompact(); }); }, { passive: true });
   if (window.ResizeObserver) new ResizeObserver(() => measureRecap()).observe($('#recap'));
+  /* Alla ripresa dall'app in background: stato animazioni pulito e misure del riepilogo rifatte (anche ritardate). */
+  const resumed = () => { resetMotion(); measureRecap(true); setCompact(); setTimeout(() => { measureRecap(true); updateFab(); }, 350); };
+  window.addEventListener('pageshow', resumed);
+  window.addEventListener('orientationchange', () => setTimeout(resumed, 250));
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => measureRecap(true));
   V.lastToday = todayKey();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') persist();
-    else { const t = todayKey(); if (t !== V.lastToday) { if (V.date === V.lastToday) V.date = t; V.lastToday = t; render(); } }
+    else { const t = todayKey(); if (t !== V.lastToday) { if (V.date === V.lastToday) V.date = t; V.lastToday = t; render(); } resumed(); }
   });
   window.addEventListener('pagehide', persist);
-  window.addEventListener('resize', updateFab);
-  render();
+  window.addEventListener('resize', () => { measureRecap(true); updateFab(); });
+  render(); measureRecap(true);
   try { if (!localStorage.getItem(KEY)) persist(); } catch (e) { }
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { }
   try { if (!localStorage.getItem('piano-hint-swipe')) { localStorage.setItem('piano-hint-swipe', '1'); setTimeout(() => toast('Scorri a destra o a sinistra per cambiare giorno'), 1400); } } catch (e) { }
