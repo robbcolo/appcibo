@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.1.2';
+const APP_VERSION = '1.2.0';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
@@ -38,7 +38,7 @@ function dateMain(k) {
 /* ===================== Archivio dati ===================== */
 const defaults = () => ({
   v: 1,
-  settings: { targets: { kcal: 2200, p: 155, c: 265, f: 55 }, phase: 'minicut', weekly: [1, 0, 1, 0, 1, 1, 0], activityPct: 50, startWeight: 68.5, waterGoal: 2.5, lastBackup: 0, mealsSeeded: true },
+  settings: { targets: { kcal: 2200, p: 155, c: 265, f: 55 }, phase: 'minicut', weekly: [1, 0, 1, 0, 1, 1, 0], activityPct: 50, startWeight: 68.5, waterGoal: 2.5, lastBackup: 0, mealsSeeded: true, estMargin: 0 },
   days: {}, custom: [], saved: [], recents: {}, weights: [{ date: '2026-10-19', kg: 67 }], created: Date.now(),
 });
 /* Ogni giorno parte con i pasti principali già pronti (vuoti): se ne salti uno basta non toccarlo, se ne aggiungi uno lo crei tu. */
@@ -86,7 +86,7 @@ function dayTarget(d) {
 }
 const defType = k => S.settings.weekly[(pk(k).getDay() + 6) % 7] ? 'training' : 'rest';
 const newDay = k => ({ date: k, type: defType(k), meals: defMeals(), activities: [], water: 0, supp: { whey: false, creatine: false }, targetOverride: null });
-const V = { date: todayKey(), tab: 'oggi', open: {}, weightDate: null, openMeals: {}, lastMeal: null };
+const V = { date: todayKey(), tab: 'oggi', open: {}, weightDate: null, openMeals: {}, lastMeal: null, weekOff: 0 };
 /* Giorno non ancora salvato: resta in "bozza" (stessi id dei pasti a ogni lettura) finché non ci scrivi qualcosa. */
 let draftDay = null;
 const cur = () => S.days[V.date] || (draftDay && draftDay.date === V.date ? draftDay : (draftDay = newDay(V.date)));
@@ -102,7 +102,14 @@ const findMeal = (d, id) => d.meals.find(m => m.id === id);
 /* ===================== Catalogo ===================== */
 let FMAP = null;
 const allFoods = () => [...D.FOODS, ...D.VENUE_FOODS, ...S.custom];
-function foodMap() { if (!FMAP) { FMAP = new Map(); allFoods().forEach(f => FMAP.set(f.id, f)); } return FMAP; }
+/* Margine di sicurezza (opzionale) sulle voci «stima» del catalogo: kcal, carboidrati e grassi salgono, le proteine restano. */
+function withMargin(f) {
+  const m = +S.settings.estMargin || 0;
+  if (!m || f.src !== 'stima' || f.custom) return f;
+  const k = 1 + m / 100;
+  return { ...f, mg: m, per: { kcal: f.per.kcal * k, p: f.per.p, c: f.per.c * k, f: f.per.f * k } };
+}
+function foodMap() { if (!FMAP) { FMAP = new Map(); allFoods().forEach(f => FMAP.set(f.id, withMargin(f))); } return FMAP; }
 const invalidateFoods = () => { FMAP = null; };
 const foodById = id => foodMap().get(id);
 const dishById = id => D.DISHES.find(d => d.id === id);
@@ -112,12 +119,12 @@ function unitStr(it, qty) {
   return it.unit || 'porzione';
 }
 function mkItem(food, qty, extra = {}) {
-  return { id: uid(), fid: food.id, name: food.name, kind: food.kind, per: { ...food.per }, unit: food.unit, qty, note: food.note || '', src: food.src || '', ...extra };
+  return { id: uid(), fid: food.id, name: food.name, kind: food.kind, per: { ...food.per }, unit: food.unit, qty, note: food.note || '', src: food.src || '', ...(food.mg ? { mg: food.mg } : {}), ...extra };
 }
 function cfgOf(it) {
   const f = foodById(it.fid) || {};
   const isG = it.kind === 'g';
-  return { id: it.fid, name: it.name, kind: it.kind, per: it.per, unit: it.unit, note: it.note, src: it.src,
+  return { id: it.fid, name: it.name, kind: it.kind, per: it.per, unit: it.unit, note: it.note, src: it.src, mg: it.mg,
     def: f.def != null ? f.def : (isG ? 100 : 1), step: f.step || (isG ? 10 : 1), min: f.min, max: f.max, chips: f.chips, pz: f.pz };
 }
 function qtyText(it) {
@@ -266,7 +273,7 @@ function groupItems(items) {
 }
 function itemRow(m, it) {
   const mc = itemMacro(it);
-  const tag = it.src === 'stima' ? '<span class="tag stima">stima</span>' : (it.src === 'etichetta' ? '<span class="tag etichetta">etichetta</span>' : '');
+  const tag = it.src === 'stima' ? `<span class="tag stima">stima${it.mg ? ' +' + it.mg + '%' : ''}</span>` : (it.src === 'etichetta' ? '<span class="tag etichetta">etichetta</span>' : '');
   return `<button class="item" data-act="editItem" data-meal="${m.id}" data-id="${it.id}">
     <div><div class="item-name">${esc(it.name)}</div><div class="item-qty">${esc(qtyText(it))}${it.note ? ' · ' + esc(it.note) : ''}${tag}</div></div>
     <div class="item-m">${f0(mc.kcal)} kcal<small>P ${f1(mc.p)} · C ${f1(mc.c)} · G ${f1(mc.f)}</small></div></button>`;
@@ -324,7 +331,7 @@ function viewOggi() {
     const allOpen = d.meals.every(m => V.openMeals[m.id]);
     if (d.meals.length > 1) h += `<div class="meals-tools"><span>${d.meals.length} pasti</span><button data-act="toggleAll">${allOpen ? 'Chiudi tutti' : 'Apri tutti'}</button></div>`;
     h += d.meals.map(mealCard).join('');
-    h += `<div class="stack" style="margin-bottom:14px"><button class="btn primary" data-act="newMeal">+ Nuovo pasto</button><div class="btn-row"><button class="btn" data-act="templates">Giornata tipo</button><button class="btn" data-act="copyDay">Copia da…</button></div></div>`;
+    h += `<div class="stack" style="margin-bottom:14px"><button class="btn primary" data-act="newMeal">+ Nuovo pasto</button><button class="btn" data-act="closeMacros">Chiudi i macro</button><div class="btn-row"><button class="btn" data-act="templates">Giornata tipo</button><button class="btn" data-act="copyDay">Copia da…</button></div></div>`;
   }
   return h + dayCard(d);
 }
@@ -365,10 +372,72 @@ function dayDetail(d) {
   return `<div class="day-detail">${meals}${extra.length ? `<p class="hint">${extra.map(esc).join('<br>')}</p>` : ''}
     <div class="btn-row" style="margin-top:12px"><button class="btn sm" style="width:100%" data-act="openDay" data-date="${d.date}">Apri e modifica</button><button class="btn sm" style="width:100%" data-act="copyFromDay" data-date="${d.date}">Copia su oggi</button></div></div>`;
 }
+/* Report settimanale (lunedì-domenica). Oggi resta fuori finché la settimana è in corso: la giornata non è finita. */
+const weekMon = off => { const t = todayKey(); return addDays(t, -((pk(t).getDay() + 6) % 7) + 7 * off); };
+function weekStats(off) {
+  const mon = weekMon(off), sun = addDays(mon, 6), today = todayKey();
+  const all = loggedDays().filter(k => k >= mon && k <= sun);
+  const keys = all.filter(k => k !== today).sort();
+  const n = keys.length, tot = Z(), tgt = Z();
+  let inT = 0, kHi = 0, kLo = 0, pLow = 0, incompl = 0;
+  keys.forEach(k => {
+    const d = S.days[k], t = dayTotals(d), tg = dayTarget(d);
+    addM(tot, t); addM(tgt, { kcal: tg.kcal, p: tg.p, c: tg.c, f: tg.f });
+    const e = (t.kcal - tg.kcal) / tg.kcal, pOk = t.p >= tg.p * 0.9;
+    if (Math.abs(e) <= 0.05 && pOk) inT++;
+    if (e > 0.05) kHi++; else if (e < -0.05) kLo++;
+    if (!pOk) pLow++;
+    if (t.kcal < tg.kcal * 0.6) incompl++;
+  });
+  const avg = n ? { kcal: tot.kcal / n, p: tot.p / n, c: tot.c / n, f: tot.f / n } : null;
+  const tav = n ? { kcal: tgt.kcal / n, p: tgt.p / n, c: tgt.c / n, f: tgt.f / n } : null;
+  const ws = S.weights.filter(w => w.date >= mon && w.date <= sun);
+  const kg = ws.length ? ws.reduce((a, w) => a + w.kg, 0) / ws.length : null;
+  return { mon, sun, n, keys, avg, tav, inT, kHi, kLo, pLow, incompl, kg, nw: ws.length, todayHas: off === 0 && all.includes(today) };
+}
+function weekCard() {
+  const off = V.weekOff, w = weekStats(off), pv = weekStats(off - 1);
+  const lab = k => pk(k).toLocaleDateString('it-IT', { day: 'numeric', month: 'short' }).replace(/\.$/, '');
+  const hasOlder = loggedDays().some(k => k < w.mon) || S.weights.some(x => x.date < w.mon);
+  const dlt = (a, b, u, d1) => { const x = a - b; return (x > 0 ? '+' : x < 0 ? '−' : '±') + (d1 ? f1(Math.abs(x)) : f0(Math.abs(x))) + u; };
+  const pct = (a, b) => b ? Math.round((a / b - 1) * 100) : 0;
+  let h = `<section class="card"><div class="wk-head"><button class="btn sm" data-act="weekPrev" aria-label="Settimana precedente"${hasOlder ? '' : ' disabled'}>‹</button>
+    <div class="wk-t"><h3>${off === 0 ? 'Questa settimana' : off === -1 ? 'Settimana scorsa' : 'Settimana'}</h3><div class="sub" style="margin:0">${lab(w.mon)} – ${lab(w.sun)}</div></div>
+    <button class="btn sm" data-act="weekNext" aria-label="Settimana successiva"${off < 0 ? '' : ' disabled'}>›</button></div>`;
+  if (!w.n) {
+    h += `<p class="hint" style="margin-top:12px">${w.todayHas ? 'Per ora c\'è solo oggi, e la giornata non è finita: il report si riempie da domani.' : 'Nessun giorno con pasti registrati in questa settimana.'}</p>`;
+  } else {
+    const row = (l, v, sub, cls) => `<div class="wk-row ${cls || ''}"><span>${l}</span><b>${v}</b>${sub ? `<small>${sub}</small>` : ''}</div>`;
+    const pvOk = pv.n >= 2;
+    h += `<div class="wk-grid">`;
+    h += row('Giorni registrati', `${w.n} / ${off === 0 ? Math.max(w.n, Math.min(7, (pk(todayKey()).getDay() + 6) % 7)) : 7}`, off === 0 ? 'oggi escluso' : '');
+    h += row('Giorni in target', `${w.inT} / ${w.n}`, 'kcal ±5% e proteine ≥ 90%', w.inT === w.n ? 'ok' : '');
+    h += row('Kcal medie', f0(w.avg.kcal), `target ${f0(w.tav.kcal)} (${pct(w.avg.kcal, w.tav.kcal) > 0 ? '+' : pct(w.avg.kcal, w.tav.kcal) < 0 ? '−' : '±'}${Math.abs(pct(w.avg.kcal, w.tav.kcal))}%)${pvOk ? ' · ' + dlt(w.avg.kcal, pv.avg.kcal, '', 0) + ' sulla precedente' : ''}`);
+    h += row('Proteine medie', f0(w.avg.p) + ' g', `target ${f0(w.tav.p)} (${pct(w.avg.p, w.tav.p) > 0 ? '+' : pct(w.avg.p, w.tav.p) < 0 ? '−' : '±'}${Math.abs(pct(w.avg.p, w.tav.p))}%)${pvOk ? ' · ' + dlt(w.avg.p, pv.avg.p, ' g', 0) + ' sulla precedente' : ''}`);
+    h += row('Carboidrati / grassi', `${f0(w.avg.c)} / ${f0(w.avg.f)} g`, `target ${f0(w.tav.c)} / ${f0(w.tav.f)} g`);
+    h += `</div>`;
+    const bits = [];
+    if (w.kHi) bits.push(`kcal sopra il target in ${w.kHi} ${w.kHi === 1 ? 'giorno' : 'giorni'}`);
+    if (w.kLo) bits.push(`kcal sotto il target in ${w.kLo} ${w.kLo === 1 ? 'giorno' : 'giorni'}`);
+    if (w.pLow) bits.push(`proteine sotto il 90% in ${w.pLow} ${w.pLow === 1 ? 'giorno' : 'giorni'}`);
+    if (bits.length) h += `<p class="hint" style="margin-top:10px">${bits.join(' · ')}.</p>`;
+    if (w.n < 3) h += `<p class="hint">Pochi giorni registrati: con meno di 3 giorni le medie dicono poco.</p>`;
+    if (w.incompl) h += `<p class="hint">${w.incompl} ${w.incompl === 1 ? 'giorno è' : 'giorni sono'} sotto il 60% del target di kcal: se avevi dimenticato di registrare, le medie risultano più basse del reale.</p>`;
+  }
+  if (w.kg != null || pv.kg != null) {
+    h += `<div class="sep"></div><div class="wk-grid">`;
+    const sub = w.kg != null && pv.kg != null ? `${dlt(w.kg, pv.kg, ' kg', 1)} sulla settimana precedente (${w.nw} ${w.nw === 1 ? 'pesata' : 'pesate'})` : w.kg != null ? `${w.nw} ${w.nw === 1 ? 'pesata' : 'pesate'}; nessuna pesata nella settimana precedente per il confronto` : 'nessuna pesata in questa settimana';
+    h += `<div class="wk-row"><span>Peso medio</span><b>${w.kg != null ? f1(w.kg) + ' kg' : '–'}</b><small>${sub}</small></div></div>`;
+    if (w.kg != null && pv.kg != null && Math.abs(w.kg - pv.kg) < 0.5) h += `<p class="hint">Variazioni sotto 0,5 kg in una settimana possono essere solo oscillazioni (acqua, sale, glicogeno): per giudicare serve il trend su 2-3 settimane.</p>`;
+  }
+  return h + '</section>';
+}
 function viewStorico() {
   const keys = loggedDays();
   let h = '<h1 class="view-title">Storico</h1>';
   if (!keys.length) return h + '<section class="card empty"><h3>Ancora nessun giorno</h3><p>Quando registri i pasti, i giorni con i valori salvati compaiono qui.</p></section>';
+  if (V.weekOff === 0 && !V.weekTouched && weekStats(0).n === 0 && weekStats(-1).n > 0) V.weekOff = -1;
+  h += weekCard();
   const last7 = keys.slice(0, 7), a7 = avgOf(last7);
   const k30 = keys.filter(k => k >= addDays(todayKey(), -30));
   const tr = avgOf(k30.filter(k => S.days[k].type === 'training')), rs = avgOf(k30.filter(k => S.days[k].type !== 'training'));
@@ -465,6 +534,9 @@ function viewAltro() {
   h += `<section class="card"><h3>Attività extra</h3><p class="sub">Quanta parte delle kcal stimate di padel e simili aggiungi al target del giorno.</p>
     <div class="row"><input type="range" min="0" max="100" step="10" value="${st.activityPct}" data-set-range="activityPct" style="flex:1"><b class="num" style="min-width:52px;text-align:right" id="actPctVal">${st.activityPct}%</b></div>
     <p class="hint">Le stime di calorie dell'attività sono imprecise (spesso per eccesso): con 50% sei prudente. Le kcal in più vengono aggiunte come carboidrati.</p></section>`;
+  h += `<section class="card"><h3>Margine sulle stime</h3><p class="sub">Per i piatti «stima» (pizzeria, hamburgheria e locali senza dati ufficiali) puoi aggiungere un margine di sicurezza: kcal, carboidrati e grassi salgono della percentuale scelta, le proteine restano come sono.</p>
+    <div class="chips">${[[0, 'Nessuno'], [10, '+10%'], [20, '+20%']].map(([v, l]) => `<button class="chip ${(+st.estMargin || 0) === v ? 'on' : ''}" data-act="margin" data-v="${v}">${l}</button>`).join('')}</div>
+    <p class="hint">È una regola pratica, non un valore misurato: i piatti dei locali si discostano dalle tabelle anche del 10-20% o più, ma non esiste un fattore valido per ogni piatto. Vale per gli alimenti che aggiungi da ora; quelli già inseriti non cambiano.</p></section>`;
   h += `<section class="card"><h3>Peso di partenza</h3><p class="sub">Serve per il grafico del peso.</p>${fld('Peso di partenza (kg)', 'startWeight', st.startWeight, 'decimal')}</section>`;
   h += `<section class="card"><h3>I miei alimenti</h3><p class="sub">Alimenti extra e prodotti salvati dalla ricerca online.</p>
     ${S.custom.length ? `<div class="mlist">${S.custom.map(f => `<div class="act-row"><div><b>${esc(f.name)}</b><div class="muted" style="font-size:14px">${f.kind === 'g' ? 'per 100 g: ' : 'a porzione: '}${f0(f.per.kcal)} kcal · P ${f1(f.per.p)} · C ${f1(f.per.c)} · G ${f1(f.per.f)}</div></div><div style="display:flex;gap:6px"><button class="btn sm" data-act="editCustom" data-id="${f.id}">Modifica</button><button class="btn sm danger" data-act="delCustom" data-id="${f.id}">✕</button></div></div>`).join('')}</div>` : '<p class="muted">Nessun alimento salvato.</p>'}
@@ -712,7 +784,7 @@ function openDish(o) {
   const tot = () => comps.filter(c => c.on).reduce((a, c) => addM(a, itemMacro(c)), Z());
   const mults = [0.5, 0.75, 1, 1.25, 1.5, 2];
   const mLab = m => ({ 0.5: '½', 0.75: '¾', 1: '×1', 1.25: '1¼', 1.5: '1½', 2: '×2' }[m]);
-  sh.body.innerHTML = `<div class="max"><div class="qty-name">${esc(dishName)}</div><p class="qty-note">Togli o aggiungi gli ingredienti e cambia le quantità come vuoi.</p>
+  sh.body.innerHTML = `<div class="max"><div class="qty-name">${esc(dishName)}</div><p class="qty-note">${dish && dish.note ? esc(dish.note) + ' ' : ''}Togli o aggiungi gli ingredienti e cambia le quantità come vuoi.</p>
     <div class="chips d-mult" style="margin-bottom:6px"></div><div class="d-comps"></div>
     <div class="tiles"><div class="tile"><b class="t-k"></b><span>kcal</span></div><div class="tile p"><b class="t-p"></b><span>proteine</span></div><div class="tile c"><b class="t-c"></b><span>carboidrati</span></div><div class="tile f"><b class="t-f"></b><span>grassi</span></div></div></div>`;
   function draw() {
@@ -1008,6 +1080,120 @@ async function offSearch(q) {
   } finally { clearTimeout(to); }
 }
 
+/* ===================== Chiudi i macro ===================== */
+/* Cerca, tra i tuoi spuntini e alimenti pratici, 1-2 voci che avvicinano la giornata al target
+   (kcal entro ±5%, proteine ≥ 90%). È un aiuto di calcolo: non considera fibre, sazietà, gusto o orario. */
+const CLOSE_FOODS = ['whey', 'yogurt', 'fesa_tacchino', 'tonno', 'uova', 'banana', 'mela', 'gallette', 'pane', 'avena', 'riso', 'mandorle', 'burro_arachidi'];
+const CLOSE_DISH_CATS = ['Shaker e spuntini', 'Merenda', 'Pre-nanna', 'Colazione'];
+function closeCandidates() {
+  const out = [], MULTS = [1, 0.5, 1.5, 2];
+  CLOSE_FOODS.forEach(id => {
+    const f = foodById(id); if (!f) return;
+    const step = f.step || 1, seen = new Set();
+    MULTS.forEach(m => {
+      const q = Math.max(step, snapTo(f.def * m, step)); if (seen.has(q)) return; seen.add(q);
+      const items = [mkItem(f, q)];
+      out.push({ kind: 'food', id, ids: [id], items, m: sumItems(items), label: f.name + ' · ' + qtyText(items[0]) });
+    });
+  });
+  D.DISHES.filter(x => !x.venue && CLOSE_DISH_CATS.includes(x.cat)).forEach(x => {
+    const hasCrea = x.items.some(c => c.f === 'creatina'), seen = new Set();
+    MULTS.forEach(m => {
+      if (hasCrea && m !== 1) return;
+      const items = expandDish(x, m), sig = items.map(i => i.qty).join(',');
+      if (seen.has(sig)) return; seen.add(sig);
+      out.push({ kind: 'dish', id: x.id, ids: x.items.map(c => c.f).concat(x.id), items, m: sumItems(items), label: x.name + (m === 1 ? '' : ' (' + ({ 0.5: 'circa ½ porzione', 1.5: 'circa 1½ porzioni', 2: 'circa 2 porzioni' }[m]) + ')') });
+    });
+  });
+  return out;
+}
+function closeCost(cur, t, tg) {
+  const a = { kcal: cur.kcal + t.kcal, p: cur.p + t.p, c: cur.c + t.c, f: cur.f + t.f };
+  const ek = (a.kcal - tg.kcal) / tg.kcal;
+  let cost = 4 * Math.abs(ek);
+  if (ek > 0.05) cost += 6 * (ek - 0.05);
+  if (ek < -0.05) cost += 2 * (-ek - 0.05);
+  const ep = (a.p - tg.p) / tg.p;
+  if (ep < -0.1) cost += 8 * (-ep - 0.1); else if (ep < 0) cost += 2 * -ep;
+  if (ep > 0.1) cost += 3 * (ep - 0.1);
+  if (Math.abs(ek) > 0.04) cost += 1;
+  if (a.p < tg.p * 0.92) cost += 1;
+  cost += 1.2 * Math.abs(a.c - tg.c) / tg.c;
+  const ef = (a.f - tg.f) / tg.f; cost += ef > 0 ? 1.5 * ef : 0.5 * -ef;
+  return cost;
+}
+const dayStatus = (tot, tg) => ({ kcalOk: Math.abs(tot.kcal - tg.kcal) <= tg.kcal * 0.05, pOk: tot.p >= tg.p * 0.9 });
+function closeSuggestions(tot, tg) {
+  const cands = closeCandidates(), res = [];
+  const consider = (parts) => {
+    const t = parts.reduce((a, c) => addM(a, c.m), Z());
+    res.push({ parts, t, cost: closeCost(tot, t, tg) + 0.03 * (parts.length - 1) });
+  };
+  cands.forEach(a => consider([a]));
+  const foods = cands.filter(c => c.kind === 'food');
+  cands.forEach(a => foods.forEach(b => {
+    if (a === b || a.id === b.id || (a.kind === 'food' && a.id > b.id)) return;
+    if (a.kind === 'dish' && a.ids.includes(b.id)) return;
+    consider([a, b]);
+  }));
+  res.sort((x, y) => x.cost - y.cost);
+  const pick = [], used = new Set(), sigs = new Set();
+  for (const r of res) {
+    const ids = r.parts.map(p => p.id), sig = [r.t.kcal / 5, r.t.p, r.t.c, r.t.f].map(v => Math.round(v)).join('/');
+    if (ids.some(i => used.has(i)) || sigs.has(sig)) continue;
+    pick.push(r); sigs.add(sig); ids.forEach(i => used.add(i));
+    if (pick.length === 3) break;
+  }
+  return pick;
+}
+function openClose() {
+  const d = cur(), tg = dayTarget(d), tot = dayTotals(d);
+  const rem = { kcal: tg.kcal - tot.kcal, p: tg.p - tot.p, c: tg.c - tot.c, f: tg.f - tot.f };
+  const st = dayStatus(tot, tg);
+  const sh = openSheet('Chiudi i macro');
+  let meal = (findMeal(d, V.lastMeal) || d.meals[d.meals.length - 1] || {}).id;
+  const sg = (v, k) => (v < 0 ? '−' : '') + f0(Math.abs(v)) + k;
+  let sugg = [];
+  const head = `<p class="qty-note">Ti manca per il target di oggi (un valore negativo vuol dire che l'hai già superato):</p>
+    <div class="tiles" style="margin-top:8px"><div class="tile"><b>${sg(rem.kcal, '')}</b><span>kcal</span></div><div class="tile p"><b>${sg(rem.p, '')}</b><span>proteine</span></div><div class="tile c"><b>${sg(rem.c, '')}</b><span>carboidrati</span></div><div class="tile f"><b>${sg(rem.f, '')}</b><span>grassi</span></div></div>`;
+  let msg = '';
+  if (!d.meals.length) msg = 'Crea prima un pasto dalla schermata Oggi.';
+  else if (st.kcalOk && st.pOk) msg = 'Sei già in target: kcal entro il 5% e proteine almeno al 90%. Non serve aggiungere altro.';
+  else if (rem.kcal > 900) msg = 'Ti mancano ancora molte kcal: troppe per uno spuntino. Registra prima i pasti principali, poi torna qui per sistemare il resto della giornata.';
+  else if (rem.kcal < -tg.kcal * 0.05 && rem.p <= tg.p * 0.1) msg = 'Hai già superato il target di kcal e le proteine sono quasi a posto: non aggiungerei altro.';
+  else { sugg = closeSuggestions(tot, tg); if (!sugg.length) msg = 'Non trovo combinazioni utili con gli alimenti a disposizione.'; }
+  function draw() {
+    const over = rem.kcal < -tg.kcal * 0.05;
+    let h = head;
+    if (msg) h += `<p class="hint" style="margin-top:14px">${esc(msg)}</p>`;
+    if (sugg.length) {
+      if (over) h += `<p class="hint" style="margin-top:14px">Sei sopra il target di kcal, ma ti mancano proteine: ecco le opzioni che pesano meno sulle kcal.</p>`;
+      h += `<div class="chips scroll p-target" style="margin:14px 0 0"><span class="muted" style="flex:none;align-self:center;font-size:14px">Aggiungi a</span>${d.meals.map(m => `<button class="chip ${m.id === meal ? 'on' : ''}" data-sa="mealpick" data-id="${m.id}">${esc(m.name)}</button>`).join('')}</div>`;
+      h += sugg.map((r, i) => {
+        const a = { kcal: tot.kcal + r.t.kcal, p: tot.p + r.t.p, c: tot.c + r.t.c, f: tot.f + r.t.f };
+        return `<div class="sugg"><ul>${r.parts.map(p => `<li>${esc(p.label)}</li>`).join('')}</ul>
+          <div class="muted" style="font-size:14px">Aggiunge ${f0(r.t.kcal)} kcal · P ${f0(r.t.p)} · C ${f0(r.t.c)} · G ${f0(r.t.f)}</div>
+          <div class="after">Giornata: <b>${f0(a.kcal)}</b> / ${f0(tg.kcal)} kcal · P <b>${f0(a.p)}</b> / ${f0(tg.p)} · C <b>${f0(a.c)}</b> / ${f0(tg.c)} · G <b>${f0(a.f)}</b> / ${f0(tg.f)}</div>
+          <button class="btn primary" data-sa="addsug" data-i="${i}">Aggiungi a ${esc(mealName(meal))}</button></div>`;
+      }).join('');
+      h += `<p class="hint">Combinazioni calcolate sui tuoi spuntini e alimenti abituali per avvicinarsi a kcal (±5%) e proteine (≥ 90%). È solo un calcolo: non tiene conto di fame, fibre, gusto o orario. Dopo l'aggiunta puoi cambiare le quantità.</p>`;
+    }
+    sh.body.innerHTML = `<div class="max">${h}</div>`;
+  }
+  sh.foot.innerHTML = '<button class="btn" data-sa="close">Chiudi</button>';
+  sh.on({
+    mealpick: el => { meal = el.dataset.id; draw(); },
+    addsug: el => {
+      const r = sugg[+el.dataset.i]; if (!r || !meal) return;
+      addItemsTo(meal, cloneItems(r.parts.flatMap(p => p.items)));
+      V.openMeals[meal] = true; V.lastMeal = meal;
+      toast('Aggiunto a ' + mealName(meal)); sh.close();
+    },
+  });
+  draw();
+  return sh;
+}
+
 /* ===================== Selettore alimenti ===================== */
 function openPicker(mealId) {
   const P = { meal: mealId, tab: 'alimenti', cat: 'Tutti', venue: null, dcat: 'Tutti', q: '', dq: '', added: 0, off: { q: '', res: null, busy: false, err: '' } };
@@ -1060,23 +1246,44 @@ function openPicker(mealId) {
     return list;
   }
   function foodRow(f, extraSub) {
+    f = foodById(f.id) || f;
     const q = lastQty(f), tmp = mkItem(f, q);
-    return `<div class="frow"><button class="main" data-sa="food" data-id="${esc(f.id)}"><b>${esc(f.name)}</b><span>${esc(label(tmp))}${f.src === 'stima' ? ' · stima' : ''}${extraSub || ''}</span></button><button class="quick" data-sa="quick" data-id="${esc(f.id)}" aria-label="Aggiungi ${esc(f.name)}">+</button></div>`;
+    return `<div class="frow"><button class="main" data-sa="food" data-id="${esc(f.id)}"><b>${esc(f.name)}</b><span>${esc(label(tmp))}${f.src === 'stima' ? ' · stima' + (f.mg ? ' +' + f.mg + '%' : '') : ''}${extraSub || ''}</span></button><button class="quick" data-sa="quick" data-id="${esc(f.id)}" aria-label="Aggiungi ${esc(f.name)}">+</button></div>`;
   }
+  function dishRow(x, sub) {
+    const t = dishTotals(x), est = x.items.some(c => { const f = foodById(c.f); return f && f.src === 'stima'; });
+    return `<div class="frow"><button class="main" data-sa="dish" data-id="${x.id}"><b>${esc(x.name)}</b><span>${esc(sub || x.cat)} · ${f0(t.kcal)} kcal · P ${f0(t.p)} · C ${f0(t.c)} · G ${f0(t.f)}${est ? ' · stima' : ''}</span></button><button class="quick" data-sa="dquick" data-id="${x.id}" aria-label="Aggiungi ${esc(x.name)}">+</button></div>`;
+  }
+  const venueDishes = (v, toks) => D.DISHES.filter(x => x.venue === v && (!toks || toks.every(t => norm(x.name + ' ' + x.venue).includes(t))));
   function drawList() {
     if (P.tab === 'alimenti') {
       const list = foodsFor();
-      if (!list.length) { LS.innerHTML = `<p class="muted" style="padding:18px 2px">${P.cat === 'Miei' ? 'Non hai ancora alimenti tuoi. Creali dalla scheda Extra o cerca online.' : P.cat === 'Recenti' ? 'Qui compariranno gli alimenti che aggiungi.' : 'Nessun risultato. Prova la scheda Online o Extra.'}</p>`; return; }
-      let html = '', lastG = null;
-      list.forEach(f => {
-        if (!P.q && P.cat === 'Fuori casa') { const g = (P.venue ? '' : f.venue + ' · ') + (f.group || ''); if (g !== lastG) { html += `<div class="group-title">${esc(g)}</div>`; lastG = g; } }
-        html += foodRow(f, P.q && f.venue ? ' · ' + f.venue : '');
-      });
+      const toks = P.q.trim() ? norm(P.q.trim()).split(/\s+/) : null;
+      const showDishes = !!toks || P.cat === 'Fuori casa';
+      if (!list.length && !(showDishes && D.DISHES.some(x => x.venue && (!toks || toks.every(t => norm(x.name + ' ' + x.venue).includes(t)))))) { LS.innerHTML = `<p class="muted" style="padding:18px 2px">${P.cat === 'Miei' ? 'Non hai ancora alimenti tuoi. Creali dalla scheda Extra o cerca online.' : P.cat === 'Recenti' ? 'Qui compariranno gli alimenti che aggiungi.' : 'Nessun risultato. Prova la scheda Online o Extra.'}</p>`; return; }
+      let html = '', lastG = null, lastV = null;
+      if (toks) {
+        const ds = D.DISHES.filter(x => x.venue && toks.every(t => norm(x.name + ' ' + x.venue).includes(t)));
+        if (ds.length) html += ds.map(x => dishRow(x, 'Piatto pronto')).join('');
+        list.forEach(f => { html += foodRow(f, f.venue ? ' · ' + f.venue : ''); });
+      } else {
+        list.forEach(f => {
+          if (P.cat === 'Fuori casa') {
+            if (f.venue !== lastV) {
+              lastV = f.venue;
+              const ds = venueDishes(f.venue);
+              if (ds.length) { html += `<div class="group-title">${esc((P.venue ? '' : f.venue + ' · ') + 'Piatti pronti')}</div>` + ds.map(x => dishRow(x, 'Piatto pronto')).join(''); lastG = null; }
+            }
+            const g = (P.venue ? '' : f.venue + ' · ') + (f.group || ''); if (g !== lastG) { html += `<div class="group-title">${esc(g)}</div>`; lastG = g; }
+          }
+          html += foodRow(f);
+        });
+      }
       LS.innerHTML = `<div class="list">${html}</div>`;
     } else if (P.tab === 'piatti') {
       const q = norm(P.dq.trim());
       const list = D.DISHES.filter(x => (P.dcat === 'Tutti' || x.cat === P.dcat) && (!q || q.split(/\s+/).every(t => norm(x.name + ' ' + x.items.map(c => foodById(c.f).name).join(' ')).includes(t))));
-      LS.innerHTML = list.length ? `<div class="list">${list.map(x => { const t = dishTotals(x); return `<div class="frow"><button class="main" data-sa="dish" data-id="${x.id}"><b>${esc(x.name)}</b><span>${esc(x.cat)} · ${f0(t.kcal)} kcal · P ${f0(t.p)} · C ${f0(t.c)} · G ${f0(t.f)}</span></button><button class="quick" data-sa="dquick" data-id="${x.id}" aria-label="Aggiungi ${esc(x.name)}">+</button></div>`; }).join('')}</div>` : '<p class="muted" style="padding:18px 2px">Nessun piatto trovato.</p>';
+      LS.innerHTML = list.length ? `<div class="list">${list.map(x => dishRow(x)).join('')}</div>` : '<p class="muted" style="padding:18px 2px">Nessun piatto trovato.</p>';
     } else if (P.tab === 'salvati') {
       LS.innerHTML = S.saved.length ? `<div class="list">${S.saved.map(s => { const t = sumItems(s.items); return `<div class="frow"><button class="main" data-sa="saved" data-id="${s.id}"><b>${esc(s.name)}</b><span>${s.items.length} alimenti · ${f0(t.kcal)} kcal · P ${f0(t.p)}</span></button><button class="quick" data-sa="saved" data-id="${s.id}" aria-label="Aggiungi ${esc(s.name)}">+</button></div>`; }).join('')}</div>` : '<p class="muted" style="padding:18px 2px">Nessun pasto salvato. Aprendo un pasto dalla schermata Oggi puoi usare «Salva come pasto riutilizzabile».</p>';
     } else if (P.tab === 'online') {
@@ -1347,6 +1554,8 @@ const A = {
   addActivity() { openActivity(); },
   delActivity(el) { mut(d => { d.activities = d.activities.filter(a => a.id !== el.dataset.id); }); },
   editTarget() { openTarget(); },
+  weekPrev() { V.weekTouched = true; V.weekOff--; renderView(); },
+  weekNext() { V.weekTouched = true; if (V.weekOff < 0) V.weekOff++; renderView(); },
   toggleDay(el) { const k = el.dataset.date; V.open[k] = !V.open[k]; const y = window.scrollY; renderView(); window.scrollTo(0, y); },
   openDay(el) { V.date = el.dataset.date; V.tab = 'oggi'; render(); window.scrollTo(0, 0); },
   async copyFromDay(el) {
@@ -1372,6 +1581,8 @@ const A = {
     if (r) { S.weights = S.weights.filter(w => w.date !== el.dataset.date); save(); renderView(); }
   },
   preset(el) { const p = D.PRESETS[el.dataset.k]; S.settings.targets = { kcal: p.kcal, p: p.p, c: p.c, f: p.f }; S.settings.phase = el.dataset.k; save(); render(); toast('Obiettivi ' + p.label); },
+  closeMacros() { openClose(); },
+  margin(el) { S.settings.estMargin = +el.dataset.v || 0; invalidateFoods(); save(); render(); toast(S.settings.estMargin ? 'Margine sulle stime: +' + S.settings.estMargin + '%' : 'Nessun margine sulle stime'); },
   weekday(el) { const i = +el.dataset.i; S.settings.weekly[i] = S.settings.weekly[i] ? 0 : 1; draftDay = null; save(); render(); },
   newCustom() { openCustomForm({}); },
   editCustom(el) { const f = S.custom.find(x => x.id === el.dataset.id); if (f) openCustomForm({ food: f }); },

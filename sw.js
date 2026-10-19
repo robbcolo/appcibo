@@ -1,5 +1,5 @@
 /* Service worker: prima la rete (così gli aggiornamenti arrivano subito), cache come ripiego offline. */
-const CACHE = 'piano-alimentare-v1.1.2';
+const CACHE = 'piano-alimentare-v1.2.0';
 const FILES = ['./', 'index.html', 'styles.css', 'foods.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
