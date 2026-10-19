@@ -48,7 +48,8 @@ h1, h2, h3, p { margin: 0; }
 /* ---------- Riepilogo sempre visibile ---------- */
 #recap {
   position: fixed; top: 0; left: 0; right: 0; z-index: 60;
-  padding: calc(var(--safe-t) + 12px) 16px 14px;
+  /* iOS 26 sfoca la fascia sotto la barra di stato: i contenuti partono più in basso (scala con la tacca) */
+  padding: calc(var(--safe-t) * 1.45 + 12px) 16px 14px;
   background: #121722;
   border-bottom: 1px solid #323c4e;
   -webkit-user-select: none; user-select: none;

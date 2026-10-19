@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
