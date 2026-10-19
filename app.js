@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
@@ -172,9 +172,9 @@ function renderRecap() {
   $('#recap').innerHTML = `
     <div class="r-date-mini">${esc(dateMain(V.date))} · ${esc(dateSub(V.date))} · ${training ? 'Allenamento' : 'Riposo'}</div>
     <div class="r-nav">
-      <button class="icon-btn" data-act="prevDay" aria-label="Giorno precedente">‹</button>
+      <button class="icon-btn" data-act="prevDay" aria-label="Giorno precedente"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
       <label class="r-date"><span class="r-date-main">${esc(dateMain(V.date))}</span><span class="r-date-sub">${esc(dateSub(V.date))}</span><input class="r-date-input" type="date" value="${V.date}" data-act-change="pickDate" aria-label="Scegli la data"></label>
-      <button class="icon-btn" data-act="nextDay" aria-label="Giorno successivo">›</button>
+      <button class="icon-btn" data-act="nextDay" aria-label="Giorno successivo"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
       <button class="type-chip ${training ? 'training' : ''}" data-act="toggleType" aria-label="Cambia tipo di giorno">${training ? 'Allenamento' : 'Riposo'}</button>
     </div>
     <div class="r-full">
