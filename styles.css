@@ -36,7 +36,9 @@ body {
   -webkit-font-smoothing: antialiased;
   overscroll-behavior-y: none;
   touch-action: manipulation;
+  overflow-x: clip;
 }
+body.busy #view { pointer-events: none; }
 body.locked { position: fixed; width: 100%; left: 0; right: 0; overflow: hidden; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 input, select, textarea { font: inherit; color: var(--text); font-size: 17px; }
@@ -152,9 +154,10 @@ h1, h2, h3, p { margin: 0; }
 .meal-sum { flex: none; text-align: right; font: 700 18px var(--font-num); }
 .chev { flex: none; width: 28px; height: 28px; stroke: var(--muted); fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; transition: transform .25s ease; }
 .meal.open .chev { transform: rotate(180deg); stroke: var(--accent-hi); }
-.meal-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .26s ease; }
-.meal.open .meal-body { grid-template-rows: 1fr; }
-.mb-in { overflow: hidden; min-height: 0; }
+.meal.ghost { margin: 0; padding-top: 12px; border-top-width: 0; border-radius: 0 0 var(--radius) var(--radius); }
+.meal-body { display: none; }
+.meal.open .meal-body { display: block; }
+/* apertura/chiusura animate solo con transform e opacity (vedi flipFollowers in app.js): niente layout né ridisegno a ogni fotogramma */
 .meals-tools { display: flex; justify-content: space-between; align-items: center; margin: 0 4px 8px; color: var(--muted); font-size: 14px; font-weight: 600; }
 .meals-tools button { color: var(--accent-hi); font-weight: 700; padding: 8px 4px; min-height: 40px; }
 .meal-sum small { display: block; font: 500 13px var(--font); color: var(--muted); }
@@ -204,7 +207,7 @@ h1, h2, h3, p { margin: 0; }
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
   padding-bottom: var(--safe-b); height: calc(var(--tab-h) + var(--safe-b));
   display: grid; grid-template-columns: repeat(4, 1fr);
-  background: rgba(15,18,24,.96); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  background: #0f1218;
   border-top: 1px solid var(--line);
 }
 #tabbar button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: var(--faint); font-size: 12.5px; font-weight: 600; }

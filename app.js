@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
@@ -196,10 +196,11 @@ function renderRecap() {
     </div>`;
   measureRecap();
 }
+let lastRecapH = -1, lastRecapFull = -1;
 function measureRecap() {
-  const r = $('#recap');
-  if (!r.classList.contains('compact')) document.documentElement.style.setProperty('--recap-full', r.offsetHeight + 'px');
-  document.documentElement.style.setProperty('--recap-h', r.offsetHeight + 'px');
+  const r = $('#recap'), h = r.offsetHeight, st = document.documentElement.style;
+  if (!r.classList.contains('compact') && h !== lastRecapFull) { lastRecapFull = h; st.setProperty('--recap-full', h + 'px'); }
+  if (h !== lastRecapH) { lastRecapH = h; st.setProperty('--recap-h', h + 'px'); }
 }
 function updateFab() {
   const fab = $('#fab'); if (!fab) return;
@@ -212,7 +213,7 @@ function updateFab() {
       show = !(r.bottom > top + 6 && r.top < bottom - 6);
     } else show = false;
   }
-  fab.classList.toggle('on', show); document.body.classList.toggle('fab-on', show);
+  if (fab.classList.contains('on') !== show) { fab.classList.toggle('on', show); document.body.classList.toggle('fab-on', show); }
 }
 function setCompact() {
   const open = SHEETS.length > 0;
@@ -1159,11 +1160,63 @@ async function updateApp() {
 
 /* ===================== Azioni (tocchi nella pagina) ===================== */
 function setPath(path, v) { const parts = path.split('.'); let o = S.settings; while (parts.length > 1) o = o[parts.shift()]; o[parts[0]] = v; }
-function changeDay(dir) {
-  V.date = addDays(V.date, dir); V.open = {}; render(); window.scrollTo(0, 0);
-  const v = $('#view'); v.style.transition = ''; v.style.transform = ''; v.style.opacity = '';
-  if (v.animate) v.animate([{ transform: `translateX(${dir * 46}px)`, opacity: .15 }, { transform: 'translateX(0)', opacity: 1 }], { duration: 240, easing: 'cubic-bezier(.2,.8,.2,1)' });
-  updateFab();
+/* ---- Animazioni: solo transform/opacity (GPU). Niente layout né ridisegno a ogni fotogramma, così restano fluide anche a 120 Hz. ---- */
+const reduceMotion = () => !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+const EASE_OUT = 'cubic-bezier(.22,.8,.24,1)';
+/* Cambia lo stato (layout istantaneo) e fa scivolare gli elementi sottostanti dalla vecchia alla nuova posizione. */
+function flipFollowers(sec, mutate, closing) {
+  const fol = []; for (let e = sec.nextElementSibling; e; e = e.nextElementSibling) fol.push(e);
+  const animate = !!sec.animate && !reduceMotion() && fol.length > 0;
+  let ghost = null, gr = null, gTop = 0;
+  if (animate && closing) { /* copia del solo corpo (senza intestazione, per non sovrapporre i testi) */
+    const bd = $('.meal-body', sec); gr = sec.getBoundingClientRect(); gTop = bd.getBoundingClientRect().top + window.scrollY - 12;
+    ghost = document.createElement('div'); ghost.className = 'meal open ghost'; ghost.appendChild(bd.cloneNode(true));
+  }
+  const y0 = animate ? fol[0].getBoundingClientRect().top : 0;
+  mutate();
+  if (!animate) { updateFab(); return; }
+  const delta = fol[0].getBoundingClientRect().top - y0;
+  updateFab(); /* legge le posizioni finali: va fatto prima di avviare le animazioni */
+  if (Math.abs(delta) < 2) return;
+  const vh = window.innerHeight, ad = Math.abs(delta);
+  if (ghost) { /* chiusura: la vecchia card sfuma sotto gli elementi che risalgono */
+    ghost.setAttribute('aria-hidden', 'true');
+    Object.assign(ghost.style, { position: 'absolute', left: gr.left + 'px', top: gTop + 'px', width: gr.width + 'px', pointerEvents: 'none' });
+    document.body.insertBefore(ghost, $('#view'));
+    const g = ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, easing: 'ease-in' });
+    g.onfinish = g.oncancel = () => ghost.remove();
+    setTimeout(() => ghost.remove(), 600);
+  } else { /* apertura: il contenuto compare mentre gli elementi sotto scendono */
+    const inner = $('.mb-in', sec);
+    if (inner) inner.animate([{ opacity: 0, transform: 'translate3d(0,-10px,0)' }, { opacity: 1, transform: 'translate3d(0,0,0)' }], { duration: 260, easing: EASE_OUT });
+  }
+  fol.forEach(e => {
+    const r = e.getBoundingClientRect();
+    if (r.top > vh + ad || r.bottom < -ad) return; /* fuori schermo: inutile animarlo */
+    e.animate([{ transform: `translate3d(0,${-delta}px,0)` }, { transform: 'translate3d(0,0,0)' }], { duration: 280, easing: EASE_OUT });
+  });
+}
+let dayPhase = null, dayAnim = null;
+function showDay() { V.open = {}; render(); window.scrollTo(0, 0); updateFab(); }
+/* dx0 = spostamento attuale della vista (se arrivo da un trascinamento) */
+function changeDay(dir, dx0) {
+  V.date = addDays(V.date, dir);
+  const v = $('#view');
+  if (!v.animate || reduceMotion()) { v.style.willChange = ''; showDay(); return; }
+  if (dayPhase === 'out') return; /* la data è già aggiornata: la vista nuova viene disegnata a fine uscita */
+  if (dayAnim) { dayAnim.onfinish = dayAnim.oncancel = null; dayAnim.cancel(); dayAnim = null; }
+  v.style.transform = ''; v.style.opacity = '';
+  dayPhase = 'out'; document.body.classList.add('busy'); v.style.willChange = 'transform, opacity';
+  const W = Math.min(window.innerWidth, 640) * 0.3;
+  const out = v.animate([{ transform: `translate3d(${dx0 || 0}px,0,0)`, opacity: 1 }, { transform: `translate3d(${-dir * W}px,0,0)`, opacity: 0 }],
+    { duration: 110, easing: 'cubic-bezier(.4,0,1,1)', fill: 'forwards' });
+  out.onfinish = () => {
+    showDay(); /* il contenuto è invisibile: il lavoro di disegno non si nota */
+    out.cancel();
+    dayPhase = 'in';
+    dayAnim = v.animate([{ transform: `translate3d(${dir * W}px,0,0)`, opacity: 0 }, { transform: 'translate3d(0,0,0)', opacity: 1 }], { duration: 240, easing: EASE_OUT });
+    dayAnim.onfinish = dayAnim.oncancel = () => { dayPhase = null; dayAnim = null; document.body.classList.remove('busy'); v.style.willChange = ''; };
+  };
 }
 function fabAdd() {
   const d = cur();
@@ -1173,8 +1226,10 @@ function fabAdd() {
 }
 function initSwipe() {
   const view = $('#view');
-  let sw = null;
-  const blocked = e => V.tab !== 'oggi' || SHEETS.length > 0 || document.querySelector('.dlg-back') || e.touches.length !== 1;
+  let sw = null, raf = 0;
+  const blocked = e => V.tab !== 'oggi' || SHEETS.length > 0 || dayPhase || document.querySelector('.dlg-back') || e.touches.length !== 1;
+  const offset = dx => dx * 0.55;
+  const paint = () => { raf = 0; if (sw && sw.active) view.style.transform = `translate3d(${offset(sw.dx)}px,0,0)`; };
   document.addEventListener('touchstart', e => {
     if (blocked(e)) { sw = null; return; }
     const t = e.touches[0];
@@ -1187,20 +1242,23 @@ function initSwipe() {
     const t = e.touches[0], dx = t.clientX - sw.x, dy = t.clientY - sw.y;
     if (!sw.active) {
       if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { sw.dead = true; return; }
-      if (Math.abs(dx) > 16 && Math.abs(dx) > Math.abs(dy) * 1.5) sw.active = true; else return;
+      if (Math.abs(dx) > 16 && Math.abs(dx) > Math.abs(dy) * 1.5) { sw.active = true; view.style.willChange = 'transform'; } else return;
     }
     sw.dx = dx;
-    view.style.transition = 'none';
-    view.style.transform = `translateX(${dx * 0.4}px)`;
-    view.style.opacity = String(1 - Math.min(Math.abs(dx) / 600, 0.4));
+    if (!raf) raf = requestAnimationFrame(paint); /* un solo aggiornamento per fotogramma */
   }, { passive: true });
   const end = (cancel) => {
     if (!sw || !sw.active) { sw = null; return; }
     const dx = sw.dx, dt = Date.now() - sw.t; sw = null;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
     const go = !cancel && (Math.abs(dx) > 70 || (Math.abs(dx) > 40 && dt < 260));
-    if (go) { changeDay(dx < 0 ? 1 : -1); return; }
-    view.style.transition = 'transform .22s ease, opacity .22s ease'; view.style.transform = ''; view.style.opacity = '';
-    setTimeout(() => { view.style.transition = ''; }, 260);
+    const cur0 = offset(dx);
+    view.style.transform = '';
+    if (go) { changeDay(dx < 0 ? 1 : -1, cur0); return; }
+    if (view.animate) {
+      const a = view.animate([{ transform: `translate3d(${cur0}px,0,0)` }, { transform: 'translate3d(0,0,0)' }], { duration: 220, easing: EASE_OUT });
+      a.onfinish = a.oncancel = () => { view.style.willChange = ''; };
+    } else view.style.willChange = '';
   };
   document.addEventListener('touchend', () => end(false), { passive: true });
   document.addEventListener('touchcancel', () => end(true), { passive: true });
@@ -1211,10 +1269,12 @@ const A = {
   toggleMeal(el) {
     const id = el.dataset.id, m = findMeal(cur(), id); if (!m) return;
     const open = !V.openMeals[id]; V.openMeals[id] = open; if (open) V.lastMeal = id;
-    const sec = el.closest('.meal'); sec.classList.toggle('open', open); el.setAttribute('aria-expanded', open);
-    $('.meal-time', sec).textContent = mealSub(m, open);
-    const all = $('[data-act="toggleAll"]'); if (all) all.textContent = cur().meals.every(x => V.openMeals[x.id]) ? 'Chiudi tutti' : 'Apri tutti';
-    setTimeout(updateFab, 300);
+    const sec = el.closest('.meal');
+    flipFollowers(sec, () => {
+      sec.classList.toggle('open', open); el.setAttribute('aria-expanded', open);
+      $('.meal-time', sec).textContent = mealSub(m, open);
+      const all = $('[data-act="toggleAll"]'); if (all) all.textContent = cur().meals.every(x => V.openMeals[x.id]) ? 'Chiudi tutti' : 'Apri tutti';
+    }, !open);
   },
   toggleAll() { const d = cur(), open = !d.meals.every(m => V.openMeals[m.id]); d.meals.forEach(m => { V.openMeals[m.id] = open; }); renderView(); },
   fab() { fabAdd(); },
