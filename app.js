@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
@@ -142,14 +142,14 @@ function touchRecent(fid, qty) {
 }
 function expandDish(dish, mult = 1) {
   const key = uid();
-  return dish.items.map((c, i) => {
+  return dish.items.map((c, i) => c.off ? null : (() => {
     const f = foodById(c.f);
     const step = f.step || 1;
     const q = f.kind === 'g' ? Math.max(step, Math.round(c.q * mult / step) * step) : Math.max(step, Math.round(c.q * mult / step) * step);
     return mkItem(f, q, { dishKey: key, dishId: dish.id, dishName: dish.name, compIdx: i });
-  });
+  })()).filter(Boolean);
 }
-function dishTotals(dish) { return sumItems(dish.items.map(c => mkItem(foodById(c.f), c.q))); }
+function dishTotals(dish) { return sumItems(dish.items.filter(c => !c.off).map(c => mkItem(foodById(c.f), c.q))); }
 function expandTemplate(t) {
   return t.meals.map(tm => ({
     id: uid(), name: tm.name, time: tm.time || '',
@@ -554,13 +554,13 @@ function viewAltro() {
 
 /* ===================== Render ===================== */
 function renderView() {
-  const fn = { oggi: viewOggi, storico: viewStorico, peso: viewPeso, altro: viewAltro }[V.tab];
+  const fn = { oggi: viewOggi, consigli: viewConsigli, storico: viewStorico, peso: viewPeso, altro: viewAltro }[V.tab];
   $('#view').innerHTML = fn();
   $$('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.tab === V.tab));
   updateFab();
 }
 function render() { renderRecap(); renderView(); }
-function setTab(t) { V.tab = t; renderView(); window.scrollTo(0, 0); setCompact(); }
+function setTab(t) { V.tab = t; if (t === 'consigli') V.cMeal = null; renderView(); window.scrollTo(0, 0); setCompact(); }
 
 /* ===================== Notifiche e finestre ===================== */
 let toastT = null;
@@ -613,6 +613,323 @@ function openSheet(title, opts = {}) {
   requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('open')));
   return api;
 }
+/* ===================== Consigli ===================== */
+/* Che cosa mangiare dopo, costruito sul piano di Roberto: giornate tipo, piatti per ogni pasto, cena (proteina + contorno)
+   e target del giorno. Sono calcoli sui macro (budget dei pasti rimasti): non tengono conto di fame, gusto o orari reali. */
+const SLOT_ORDER = ['colazione', 'spuntinoMattina', 'pranzo', 'merenda', 'cena', 'prenanna'];
+const SLOT_OF = name => {
+  const n = norm(name);
+  if (/colazione/.test(n)) return 'colazione';
+  if (/mattina|shaker/.test(n)) return 'spuntinoMattina';
+  if (/pranzo/.test(n)) return 'pranzo';
+  if (/merenda|pomeriggio/.test(n)) return 'merenda';
+  if (/cena/.test(n)) return 'cena';
+  if (/nanna/.test(n)) return 'prenanna';
+  return 'altro';
+};
+const slotRank = s => { const i = SLOT_ORDER.indexOf(s); return i < 0 ? 99 : i; };
+const SLOT_DISH_CAT = { colazione: 'Colazione', spuntinoMattina: 'Shaker e spuntini', pranzo: 'Pranzo', merenda: 'Merenda', prenanna: 'Pre-nanna' };
+const SLOT_END = { colazione: 11, spuntinoMattina: 12.5, pranzo: 16, merenda: 18.75, cena: 23.5, prenanna: 24 }; /* ora entro cui il pasto è ancora "da fare" */
+const DEFW = { colazione: 0.2, spuntinoMattina: 0.07, pranzo: 0.3, merenda: 0.1, cena: 0.3, prenanna: 0.06, altro: 0.1 };
+const MKEYS = ['kcal', 'p', 'c', 'f'];
+const uniq = a => [...new Set(a)];
+
+function planTemplateFor(k, type) {
+  const dow = pk(k).getDay(), T = id => D.TEMPLATES.find(t => t.id === 't_' + id);
+  if (dow === 0) return T('domenica');
+  if (dow === 6) return type === 'training' ? T(V.satSlot === 'mattina' ? 'sabatoMattina' : 'sabatoPomeriggio') : T('riposoA');
+  if (dow === 5) return type === 'training' ? T('venerdi') : T('riposoA');
+  if (dow === 1) return type === 'training' ? T('lunedi') : T('riposoA');
+  return type === 'training' ? T('altroGiorno') : T(dow === 4 ? 'riposoB' : 'riposoA');
+}
+const macroOf = (f, q) => { const k = f.kind === 'g' ? q / 100 : q; return { kcal: f.per.kcal * k, p: f.per.p * k, c: f.per.c * k, f: f.per.f * k }; };
+
+/* Distanza tra ciò che propongo (t) e ciò che il pasto dovrebbe portare (b): più basso = meglio. */
+function fitCost(t, b) {
+  const kd = (t.kcal - b.kcal) / Math.max(b.kcal, 120);
+  let c = 3 * Math.abs(kd) + (kd > 0.1 ? 3 * (kd - 0.1) : 0);
+  const pd = (t.p - b.p) / Math.max(b.p, 12);
+  if (pd < -0.1) c += 4 * (-pd - 0.1);
+  if (pd > 0.4) c += 1.5 * (pd - 0.4);
+  c += Math.abs(t.c - b.c) / Math.max(b.c, 30);
+  const fd = (t.f - b.f) / Math.max(b.f, 10);
+  c += fd > 0 ? 1.5 * fd : 0.4 * -fd;
+  return c;
+}
+
+const MULT_LAB = { 0.5: '½ porzione', 0.75: '¾ di porzione', 1: '', 1.25: '1¼ porzioni', 1.5: '1½ porzioni', 2: '2 porzioni' };
+function slotCandidates(slot) {
+  const cat = SLOT_DISH_CAT[slot], out = [];
+  if (!cat) return out;
+  D.DISHES.filter(x => !x.venue && x.cat === cat).forEach(x => {
+    const hasCrea = x.items.some(c => c.f === 'creatina'), seen = new Set();
+    [1, 0.75, 1.25, 0.5, 1.5, 2].forEach(m => {
+      if (hasCrea && m !== 1) return;
+      const items = expandDish(x, m), sig = items.map(i => i.qty).join(',');
+      if (seen.has(sig)) return; seen.add(sig);
+      out.push({ key: x.id, mult: m, title: x.name + (m === 1 ? '' : ' · ' + MULT_LAB[m]), items, t: sumItems(items), dish: x });
+    });
+  });
+  return out;
+}
+function dishSuggestions(slot, b, planDishId) {
+  const by = new Map();
+  slotCandidates(slot).forEach(c => { c.cost = fitCost(c.t, b); if (!by.has(c.key)) by.set(c.key, []); by.get(c.key).push(c); });
+  const best = new Map();
+  by.forEach((arr, key) => {
+    arr.sort((x, y) => x.cost - y.cost);
+    let pick = arr[0];
+    const one = arr.find(c => c.mult === 1);
+    if (key === planDishId && one && one.cost <= pick.cost + 0.4) pick = one; /* il piatto del piano resta intero se va quasi bene */
+    best.set(key, pick);
+  });
+  const list = [...best.values()].sort((x, y) => x.cost - y.cost), pick = [];
+  const planned = best.get(planDishId);
+  if (planned) pick.push({ ...planned, planned: true });
+  for (const x of list) { if (pick.length >= 3) break; if (!pick.some(p => p.key === x.key)) pick.push(x); }
+  return pick;
+}
+
+/* Cena: proteina + contorno (+ verdura e olio come nel piano); le quantità si adattano al budget. */
+function cenaSuggestions(b, tplCena) {
+  const C = D.CENA, snap = (v, o) => Math.min(o.max, Math.max(o.min, snapTo(v, o.step)));
+  const tItems = tplCena ? tplCena.items : [];
+  const tProt = tItems.length ? tItems[0] : null;
+  const tCarb = tItems.find(i => C.carb.some(c => c.f === i.fid));
+  const tVeg = tItems.find(i => C.veg.some(v => v.f === i.fid));
+  const tOil = tItems.find(i => i.fid === C.oil.f);
+  const oil = foodById(C.oil.f), oilQ = tOil ? tOil.qty : C.oil.q;
+  const vegF = tVeg ? foodById(tVeg.fid) : null;
+  const base = addM(macroOf(oil, oilQ), vegF ? macroOf(vegF, tVeg.qty) : Z());
+  const all = [];
+  C.prot.forEach(p => {
+    const pf = foodById(p.f); if (!pf) return;
+    const pqs = uniq([0.6, 0.8, 1, 1.2, 1.4].map(m => snap(p.def * m, p)).concat(tProt && tProt.fid === p.f ? [tProt.qty] : []));
+    pqs.forEach(pq => {
+      const pm = macroOf(pf, pq), pEx = !!tProt && tProt.fid === p.f && pq === tProt.qty;
+      [{ none: true }, ...C.carb].forEach(c => {
+        const cf = c.none ? null : foodById(c.f);
+        const cqs = c.none ? [0] : uniq([0.5, 0.75, 1, 1.3, 1.7].map(m => snap(c.def * m, c)).concat(tCarb && tCarb.fid === c.f ? [tCarb.qty] : []));
+        cqs.forEach(cq => {
+          const t = addM(addM({ ...base }, pm), cf ? macroOf(cf, cq) : Z());
+          const cEx = !!tCarb && !c.none && tCarb.fid === c.f && cq === tCarb.qty;
+          all.push({ pf: p.f, cf: c.none ? null : c.f, pq, cq, t, cost: fitCost(t, b), exact: pEx && (cEx || (!tCarb && c.none)) });
+        });
+      });
+    });
+  });
+  all.sort((x, y) => x.cost - y.cost);
+  const build = r => {
+    const items = [mkItem(foodById(r.pf), r.pq)];
+    if (r.cf) items.push(mkItem(foodById(r.cf), r.cq));
+    if (vegF) items.push(mkItem(vegF, tVeg.qty));
+    items.push(mkItem(oil, oilQ));
+    const pName = foodById(r.pf).name;
+    return { key: r.pf + '|' + (r.cf || '-'), title: pName + (r.cf ? ' con ' + foodById(r.cf).name.toLowerCase() : ''), lines: items.map(i => i.name + ' ' + qtyText(i)), items, t: sumItems(items), cost: r.cost };
+  };
+  const pick = [];
+  if (tProt) {
+    const same = all.filter(r => r.pf === tProt.fid && r.cf === (tCarb ? tCarb.fid : null));
+    if (same.length) {
+      const ex = same.find(r => r.exact);
+      pick.push({ ...build(ex && ex.cost <= same[0].cost + 0.4 ? ex : same[0]), planned: true });
+    }
+  }
+  const usedP = new Set(pick.map(x => x.key.split('|')[0]));
+  for (const r of all) {
+    if (pick.length >= 3) break;
+    if (usedP.has(r.pf)) continue;
+    usedP.add(r.pf); pick.push(build(r));
+  }
+  return pick;
+}
+
+function otherSuggestions(tot, b) {
+  const pseudo = { kcal: tot.kcal + b.kcal, p: tot.p + b.p, c: tot.c + b.c, f: tot.f + b.f };
+  return closeSuggestions(tot, pseudo).map(r => ({ key: r.parts.map(p => p.id).join('+'), title: r.parts.map(p => p.label).join(' + '), items: r.parts.flatMap(p => p.items), t: r.t, cost: r.cost }));
+}
+
+/* Stato della giornata e proposte per il prossimo pasto. */
+function consigliCompute() {
+  const k = V.date, d = cur(), tg = dayTarget(d), tot = dayTotals(d), isToday = k === todayKey();
+  const now = new Date(), hr = now.getHours() + now.getMinutes() / 60;
+  const tpl = planTemplateFor(k, d.type), tplMeals = tpl ? expandTemplate(tpl) : [], tplBy = {};
+  tplMeals.forEach(m => { tplBy[SLOT_OF(m.name)] = m; });
+  /* Pasto fuori già pianificato: vale solo finché il pasto è ancora vuoto */
+  let out = d.out || null;
+  if (out) { const om = findMeal(d, out.mealId); if (!om || om.items.length || !out.dishes || !out.dishes.length) out = null; }
+  const reserved = out ? out.dishes.reduce((a, id) => { const x = dishById(id); return x ? addM(a, dishTotals(x)) : a; }, Z()) : Z();
+  const rem = { kcal: tg.kcal - tot.kcal - reserved.kcal, p: tg.p - tot.p - reserved.p, c: tg.c - tot.c - reserved.c, f: tg.f - tot.f - reserved.f };
+  /* Pasti ancora da fare: quelli vuoti del giorno + quelli del piano che il giorno non ha (es. Spuntino mattina, Pre-nanna) */
+  const have = new Set(d.meals.map(m => SLOT_OF(m.name)));
+  const slots = d.meals.filter(m => !m.items.length && !(out && out.mealId === m.id)).map(m => ({ id: m.id, name: m.name, slot: SLOT_OF(m.name), real: true }));
+  tplMeals.forEach(tm => { const s = SLOT_OF(tm.name); if (s !== 'altro' && !have.has(s)) { have.add(s); slots.push({ id: 'v:' + s, name: tm.name, slot: s, real: false }); } });
+  slots.sort((a, b) => slotRank(a.slot) - slotRank(b.slot));
+  const relevant = slots.filter(m => !isToday || m.slot === 'altro' || hr < SLOT_END[m.slot]);
+  const planW = (m, key) => {
+    const pm = tplBy[m.slot];
+    if (pm) return sumItems(pm.items)[key];
+    if (tpl && m.slot === 'prenanna') return 0;
+    const base = (DEFW[m.slot] || 0.1) * tg[key];
+    return tpl ? base * 0.4 : base;
+  };
+  const next = slots.find(m => m.id === V.cMeal) || relevant[0] || slots[slots.length - 1] || null;
+  const set = next && !relevant.includes(next) ? relevant.concat([next]) : relevant;
+  const budget = { kcal: 0, p: 0, c: 0, f: 0 };
+  if (next) MKEYS.forEach(key => { const s = set.reduce((a, m) => a + planW(m, key), 0); budget[key] = s > 0 ? Math.max(0, rem[key]) * planW(next, key) / s : 0; });
+  /* Se mancano molte kcal (pasti saltati o non registrati) non carico tutto su un solo pasto: al massimo 1,5 volte quello del piano */
+  let capped = false;
+  if (next) { const pw = planW(next, 'kcal'); if (pw > 0 && budget.kcal > pw * 1.5) { const fct = pw * 1.5 / budget.kcal; MKEYS.forEach(key => { budget[key] *= fct; }); capped = true; } }
+  let sugg = [], note = '';
+  if (!next) note = d.meals.length ? 'Tutti i pasti hanno già degli alimenti.' : 'Non ci sono pasti: creali dalla schermata Oggi.';
+  else if (rem.kcal < 60 && rem.p <= 8) note = 'Hai già raggiunto le kcal e quasi tutte le proteine di oggi: per ' + next.name + ' non serve altro.';
+  else if (rem.kcal < 60) { sugg = otherSuggestions(tot, { kcal: 110, p: Math.min(40, Math.max(0, rem.p)), c: 5, f: 3 }); note = 'Le kcal di oggi sono finite ma ti mancano proteine: ecco le opzioni più leggere.'; }
+  else if (next.slot === 'prenanna' && budget.kcal < 80) note = 'Il piano lo prevede solo se serve: per i macro di oggi puoi saltarlo.';
+  else if (next.slot === 'cena') sugg = cenaSuggestions(budget, tplBy.cena);
+  else if (SLOT_DISH_CAT[next.slot]) { const pm = tplBy[next.slot]; sugg = dishSuggestions(next.slot, budget, pm && pm.items[0] && pm.items[0].dishId); }
+  else sugg = otherSuggestions(tot, budget);
+  if (sugg.length && capped && !note) note = 'Ti mancano ancora ' + f0(rem.kcal) + ' kcal, ma recuperarle tutte in un solo pasto lo renderebbe molto più grande del tuo piano: propongo al massimo circa ' + f0(budget.kcal) + ' kcal. Se hai già mangiato, registra i pasti in Oggi; altrimenti non serve forzare il resto: conta soprattutto chiudere le proteine.';
+  if (sugg.length && budget.kcal > 0 && !note) {
+    const top = Math.max(...sugg.map(s => s.t.kcal));
+    if (top < budget.kcal * 0.8) note = 'Con porzioni normali non arrivi a questo budget (mancano circa ' + f0(budget.kcal - top) + ' kcal): non serve forzare, conta soprattutto chiudere le proteine.';
+  }
+  /* Pasto fuori: quanto lascia agli altri pasti */
+  let outInfo = null;
+  if (out) {
+    const planned = relevant.reduce((a, m) => a + planW(m, 'kcal'), 0);
+    const room = tg.kcal * 1.05 - tot.kcal - planned * 0.6;
+    outInfo = { out, reserved, planned, room, over: reserved.kcal > room, left: tg.kcal - tot.kcal - reserved.kcal, leftP: Math.max(0, tg.p * 0.9 - tot.p - reserved.p), meal: findMeal(d, out.mealId) };
+  }
+  return { d, tg, tot, rem, tpl, tplMeals, tplBy, slots, relevant, next, budget, sugg, note, outInfo, isToday };
+}
+
+/* ---- Vista ---- */
+const fitChip = (t, b) => {
+  const dk = t.kcal - b.kcal, ok = Math.abs(dk) <= Math.max(60, b.kcal * 0.1);
+  return `<span class="fit ${ok ? 'ok' : 'warn'}">${dk >= 0 ? '+' : '−'}${f0(Math.abs(dk))} kcal sul budget</span>`;
+};
+function suggCard(r, i, b, nextName) {
+  const sub = (r.lines || r.items.map(it => it.name + ' ' + qtyText(it))).map(esc).join(' · ');
+  return `<div class="sugg">${r.planned ? '<div class="badge">Previsto dal tuo piano</div>' : ''}<div class="s-title">${esc(r.title)}</div>
+    <div class="muted" style="font-size:14px;line-height:1.35">${sub}</div>
+    <div class="s-num"><b>${f0(r.t.kcal)}</b> kcal · P <b>${f0(r.t.p)}</b> · C <b>${f0(r.t.c)}</b> · G <b>${f0(r.t.f)}</b> ${b ? fitChip(r.t, b) : ''}</div>
+    <button class="btn primary" data-act="cAdd" data-i="${i}">Aggiungi a ${esc(nextName)}</button></div>`;
+}
+function viewConsigli() {
+  const C = consigliCompute(); V.cSug = C.sugg; V.cNext = C.next;
+  const { tg, rem, next, budget, tpl, tplMeals, outInfo } = C;
+  let h = '<h1 class="view-title">Consigli</h1>';
+  if (!C.isToday) h += `<div class="banner"><span>Stai guardando ${esc(dateMid(V.date))}: i consigli valgono per il giorno aperto in Oggi.</span><button data-act="cToday">Oggi</button></div>`;
+  /* 1. Prossimo pasto */
+  const pos = n => f0(Math.max(0, n));
+  h += `<section class="card"><h3>${next ? 'Prossimo pasto: ' + esc(next.name) : 'Prossimo pasto'}</h3>`;
+  h += `<p class="sub">${rem.kcal > 0 ? `Per arrivare al target ti restano <b>${f0(rem.kcal)}</b> kcal · P <b>${pos(rem.p)}</b> · C <b>${pos(rem.c)}</b> · G <b>${pos(rem.f)}</b>${outInfo ? ' (dopo il pasto fuori)' : ''}.` : `Hai raggiunto il target di kcal${outInfo ? ' (contando il pasto fuori)' : ''}${rem.kcal < -tg.kcal * 0.05 ? ' e lo hai superato di ' + f0(-rem.kcal) : ''}.`}${next && budget.kcal >= 60 ? ` Per ${esc(next.name)} punta a circa <b>${f0(budget.kcal)}</b> kcal e <b>${f0(budget.p)}</b> g di proteine.` : ''}</p>`;
+  if (C.slots.length > 1) h += `<div class="chips scroll" style="margin:10px -16px 2px">${C.slots.map(m => `<button class="chip ${next && m.id === next.id ? 'on' : ''}" data-act="cMeal" data-id="${esc(m.id)}">${esc(m.name)}</button>`).join('')}</div>`;
+  if (C.note) h += `<p class="hint" style="margin-top:12px">${esc(C.note)}</p>`;
+  h += C.sugg.map((r, i) => suggCard(r, i, budget.kcal >= 60 ? budget : null, next.name)).join('');
+  if (C.sugg.length) h += `<p class="hint">Proposte dal tuo piano, con le quantità adattate a ciò che ti resta. Il budget del pasto divide ciò che manca tra i pasti ancora da fare, in proporzione al tuo piano.</p>`;
+  h += `</section>`;
+  /* 2. Pasto fuori */
+  h += `<section class="card"><h3>Pasto fuori</h3>`;
+  if (!outInfo) {
+    h += `<p class="sub">Pizzeria o hamburgheria stasera? Scegli cosa prendi e ti dico cosa resta per gli altri pasti.</p><button class="btn" data-act="cOut">Pianifica un pasto fuori</button>`;
+  } else {
+    const o = outInfo, names = o.out.dishes.map(id => dishById(id)).filter(Boolean);
+    h += `<p class="sub">${esc(o.meal.name)}: <b>${names.map(x => esc(x.name)).join(' + ')}</b><br>circa <b>${f0(o.reserved.kcal)}</b> kcal · P ${f0(o.reserved.p)} · C ${f0(o.reserved.c)} · G ${f0(o.reserved.f)}</p>`;
+    if (o.left < 0) h += `<p class="hint warn-t">Con questo superi il target di ${f0(-o.left)} kcal, anche senza contare gli altri pasti.</p>`;
+    else h += `<p class="hint">Dopo il pasto fuori restano <b>${f0(o.left)}</b> kcal per gli altri pasti; il tuo piano ne prevede circa ${f0(o.planned)}.</p>`;
+    if (o.leftP > 5) h += `<p class="hint">Per il 90% delle proteine ti mancheranno ancora circa <b>${f0(o.leftP)}</b> g: usali per scegliere gli altri pasti (shaker, yogurt greco, tonno).</p>`;
+    if (o.over) {
+      const venue = (names[0] || {}).venue;
+      const alts = D.DISHES.filter(x => x.venue === venue && !o.out.dishes.includes(x.id) && !/^Antipasto/.test(x.name) && dishTotals(x).kcal <= o.room).sort((a, b) => dishTotals(b).kcal - dishTotals(a).kcal).slice(0, 3);
+      h += `<p class="hint warn-t">Per restare in target riducendo del 40% gli altri pasti, il pasto fuori dovrebbe stare sotto le ${f0(Math.max(0, o.room))} kcal circa.${names.length > 1 ? ' Prova senza antipasto.' : ''}</p>`;
+      if (alts.length) h += `<div class="stack" style="margin-top:8px">${alts.map(x => `<button class="btn" data-act="cOutSwap" data-id="${x.id}" style="justify-content:space-between;gap:10px;text-align:left"><span>Invece: ${esc(x.name)}</span><span class="muted" style="flex:none">${f0(dishTotals(x).kcal)} kcal</span></button>`).join('')}</div>`;
+    }
+    h += `<div class="btn-row" style="margin-top:10px"><button class="btn" data-act="cOut">Modifica</button><button class="btn" data-act="cOutLog">Aggiungi a ${esc(o.meal.name)}</button></div><button class="btn ghost" data-act="cOutClear" style="margin-top:8px">Togli il pasto fuori</button>`;
+  }
+  h += `</section>`;
+  /* 3. Piano di oggi */
+  if (tpl) {
+    const tt = sumItems(tplMeals.flatMap(m => m.items));
+    const mealText = m => { const seen = new Set(), n = []; m.items.forEach(i => { const x = i.dishName || (i.name + ' ' + qtyText(i)); if (!seen.has(x)) { seen.add(x); n.push(x); } }); return n.join(', '); };
+    h += `<section class="card"><h3>Il piano di oggi</h3><p class="sub"><b>${esc(tpl.name)}</b> · ${esc(tpl.desc || '')}</p>`;
+    if (pk(V.date).getDay() === 6 && C.d.type === 'training') h += `<div class="chips" style="margin:0 0 8px"><button class="chip ${V.satSlot === 'mattina' ? 'on' : ''}" data-act="cSat" data-v="mattina">Allenamento al mattino</button><button class="chip ${V.satSlot !== 'mattina' ? 'on' : ''}" data-act="cSat" data-v="pomeriggio">Al pomeriggio</button></div>`;
+    h += `<div class="plan">${tplMeals.map(m => `<div class="pl-row"><b>${esc(m.name)}</b><span>${esc(mealText(m))}</span></div>`).join('')}</div>
+      <p class="hint">Totale del piano: ${f0(tt.kcal)} kcal · P ${f0(tt.p)} · C ${f0(tt.c)} · G ${f0(tt.f)}</p>
+      <div class="btn-row" style="margin-top:10px"><button class="btn" data-act="cApplyPlan">Applica al giorno</button><button class="btn" data-act="templates">Altre giornate</button></div></section>`;
+  }
+  h += `<p class="hint" style="margin:4px 4px 18px">I consigli sono calcoli sui tuoi macro, non indicazioni mediche: non considerano fame, digestione o orari reali.</p>`;
+  return h;
+}
+
+/* ---- Pianificazione del pasto fuori ---- */
+function openOutPlanner() {
+  const d = cur(), tg = dayTarget(d), tot = dayTotals(d);
+  const empties = d.meals.filter(m => !m.items.length);
+  if (!empties.length) { toast('Servono pasti ancora vuoti'); return; }
+  const sh = openSheet('Pasto fuori');
+  const prev = d.out && empties.find(m => m.id === d.out.mealId) ? d.out : null;
+  const st = prev ? { mealId: prev.mealId, dishes: prev.dishes.slice() } : { mealId: (empties.find(m => SLOT_OF(m.name) === 'cena') || empties[empties.length - 1]).id, dishes: [] };
+  const venues = uniq(D.DISHES.filter(x => x.venue).map(x => x.venue));
+  function draw() {
+    const sel = st.dishes.map(id => dishById(id)).filter(Boolean), t = sel.reduce((a, x) => addM(a, dishTotals(x)), Z());
+    const left = tg.kcal - tot.kcal - t.kcal;
+    let h = `<div class="max"><div class="chips scroll" style="margin-bottom:6px"><span class="muted" style="flex:none;align-self:center;font-size:14px">Quale pasto</span>${empties.map(m => `<button class="chip ${m.id === st.mealId ? 'on' : ''}" data-sa="om" data-id="${m.id}">${esc(m.name)}</button>`).join('')}</div>`;
+    venues.forEach(v => {
+      h += `<div class="group-title">${esc(v)}</div><div class="list">${D.DISHES.filter(x => x.venue === v).map(x => {
+        const tt = dishTotals(x), on = st.dishes.includes(x.id);
+        return `<div class="frow"><button class="main" data-sa="od" data-id="${x.id}"><b>${esc(x.name)}</b><span>${f0(tt.kcal)} kcal · P ${f0(tt.p)} · C ${f0(tt.c)} · G ${f0(tt.f)}</span></button><button class="quick ${on ? 'on' : ''}" data-sa="od" data-id="${x.id}" aria-pressed="${on}" aria-label="${on ? 'Togli' : 'Scegli'} ${esc(x.name)}">${on ? '✓' : '+'}</button></div>`;
+      }).join('')}</div>`;
+    });
+    h += `<p class="hint" style="margin-top:12px">Puoi sceglierne più di uno (per esempio pizza e antipasto). Le pizze rosse sono senza mozzarella; i valori sono stime.</p></div>`;
+    sh.body.innerHTML = h;
+    sh.foot.innerHTML = `<div class="out-sum">${sel.length ? `<b>${f0(t.kcal)}</b> kcal · P ${f0(t.p)} · C ${f0(t.c)} · G ${f0(t.f)}<br><span class="muted">${left >= 0 ? 'Restano ' + f0(left) + ' kcal per gli altri pasti' : 'Superi il target di ' + f0(-left) + ' kcal'}</span>` : '<span class="muted">Scegli cosa mangi fuori</span>'}</div><button class="btn primary" data-sa="ok" ${sel.length ? '' : 'disabled'}>Pianifica</button>`;
+  }
+  sh.on({
+    om: el => { st.mealId = el.dataset.id; draw(); },
+    od: el => { const id = el.dataset.id, i = st.dishes.indexOf(id); if (i >= 0) st.dishes.splice(i, 1); else st.dishes.push(id); const y = sh.body.scrollTop; draw(); sh.body.scrollTop = y; },
+    ok: () => { if (!st.dishes.length) return; const o = { mealId: st.mealId, dishes: st.dishes.slice() }; sh.close(); mut(dd => { dd.out = o; }); toast('Pasto fuori pianificato'); },
+  });
+  draw();
+}
+
+/* ---- Azioni (unite ad A in part2) ---- */
+const SLOT_NAME = { colazione: 'Colazione', spuntinoMattina: 'Spuntino mattina', pranzo: 'Pranzo', merenda: 'Merenda', cena: 'Cena', prenanna: 'Pre-nanna' };
+const CONS_ACTIONS = {
+  cMeal(el) { V.cMeal = el.dataset.id; renderView(); },
+  cToday() { V.date = todayKey(); V.open = {}; render(); window.scrollTo(0, 0); },
+  cSat(el) { V.satSlot = el.dataset.v; renderView(); },
+  cAdd(el) {
+    const r = (V.cSug || [])[+el.dataset.i], nx = V.cNext; if (!r || !nx) return;
+    let mealId = nx.id;
+    mut(d => {
+      if (!nx.real) {
+        const slot = nx.slot, m = { id: uid(), name: nx.name || SLOT_NAME[slot], time: '', items: [] };
+        const at = d.meals.findIndex(x => slotRank(SLOT_OF(x.name)) > slotRank(slot));
+        if (at < 0) d.meals.push(m); else d.meals.splice(at, 0, m);
+        mealId = m.id;
+      }
+      const m = findMeal(d, mealId); if (m) m.items.push(...cloneItems(r.items));
+      if (d.out && d.out.mealId === mealId) delete d.out;
+    });
+    V.openMeals[mealId] = true; V.lastMeal = mealId; V.cMeal = null;
+    toast('Aggiunto a ' + nx.name);
+  },
+  cApplyPlan() {
+    const tpl = planTemplateFor(V.date, cur().type); if (!tpl) return;
+    applyMealsTo(V.date, expandTemplate(tpl), tpl.name).then(ok => { if (ok) toast('Giornata applicata'); });
+  },
+  cOut() { openOutPlanner(); },
+  cOutSwap(el) { const id = el.dataset.id; mut(d => { if (d.out) d.out.dishes = [id]; }); },
+  cOutLog() {
+    const d0 = cur(), o = d0.out; if (!o) return;
+    const items = o.dishes.map(id => dishById(id)).filter(Boolean).flatMap(x => expandDish(x));
+    mut(d => { const m = findMeal(d, o.mealId); if (m) m.items.push(...items); delete d.out; });
+    V.openMeals[o.mealId] = true; V.lastMeal = o.mealId;
+    toast('Aggiunto a ' + mealName(o.mealId));
+  },
+  cOutClear() { mut(d => { delete d.out; }); },
+};
 
 /* ===================== Operazioni sui dati ===================== */
 const snapTo = (v, step) => Math.round(Math.round(v / step) * step * 100) / 100;
@@ -777,7 +1094,7 @@ function openDish(o) {
     comps.sort((a, b) => a.idx - b.idx);
   } else {
     dishName = dish.name;
-    comps = dish.items.map((cc, i) => { const f = foodById(cc.f); return { idx: i, item: null, food: f, name: f.name, kind: f.kind, per: f.per, unit: f.unit, step: f.step || 1, qty: cc.q, on: true, base: cc.q, id: f.id, cfg: f }; });
+    comps = dish.items.map((cc, i) => { const f = foodById(cc.f); return { idx: i, item: null, food: f, name: f.name, kind: f.kind, per: f.per, unit: f.unit, step: f.step || 1, qty: cc.q, on: !cc.off, base: cc.q, id: f.id, cfg: f }; });
   }
   const orig = sumItems(its);
   const sh = openSheet(edit ? 'Modifica piatto' : 'Piatto');
@@ -1635,6 +1952,7 @@ function initSwipe() {
   document.addEventListener('touchcancel', () => end(true), { passive: true });
 }
 const A = {
+  ...CONS_ACTIONS,
   prevDay() { changeDay(-1); },
   nextDay() { changeDay(1); },
   toggleMeal(el) {
@@ -1757,7 +2075,7 @@ function init() {
   V.lastToday = todayKey();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') persist();
-    else { const t = todayKey(); if (t !== V.lastToday) { if (V.date === V.lastToday) V.date = t; V.lastToday = t; render(); } resumed(); }
+    else { const t = todayKey(); if (t !== V.lastToday) { if (V.date === V.lastToday) V.date = t; V.lastToday = t; render(); } else if (V.tab === 'consigli' && !SHEETS.length) renderView(); resumed(); }
   });
   window.addEventListener('pagehide', persist);
   window.addEventListener('resize', () => { measureRecap(true); updateFab(); });
