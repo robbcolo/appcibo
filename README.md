@@ -21,7 +21,7 @@ Web app (PWA) per seguire il piano alimentare pasto dopo pasto. Funziona sull'iP
 - **I dati restano nel telefono**, dentro l'app installata. Quelli inseriti nella pagina aperta in Safari *non* passano all'app della Home: usa sempre l'icona.
 - Se elimini l'app o cambi telefono i dati si perdono. Da **Altro → Salva un backup** esporti un file (salvalo in File o iCloud Drive); con **Ripristina da un backup** lo reimporti. L'app ti ricorda il backup dopo 7 giorni.
 - Per aggiornare l'app dopo una modifica al repository: chiudila e riaprila (con internet). Se non cambia nulla: **Altro → Aggiorna l'app**.
-- Ricerca online dei prodotti: [Open Food Facts](https://world.openfoodfacts.org) (dati inseriti dagli utenti, da verificare con l'etichetta).
+- Ricerca online dei prodotti: [Open Food Facts](https://world.openfoodfacts.org) (dati inseriti dagli utenti, da verificare con l'etichetta). Il codice a barre si può scansionare con la fotocamera (lettura con [ZXing](https://github.com/zxing-js/library), Apache-2.0, file `vendor/zxing-ean.js`).
 
 ## Struttura
 

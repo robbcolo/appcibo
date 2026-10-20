@@ -2,7 +2,7 @@
 (function () {
 'use strict';
 const D = window.NUTRI_DATA;
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const KEY = 'piano-alimentare-v1';
 
 /* ===================== Utilità ===================== */
@@ -1194,6 +1194,113 @@ function openClose() {
   return sh;
 }
 
+/* ===================== Lettore di codici a barre ===================== */
+/* Decodifica con ZXing (vendor/zxing-ean.js, caricato solo alla prima scansione). Fotocamera dal vivo,
+   oppure foto scattata con la fotocamera di sistema come ripiego. Il codice letto va alla ricerca Open Food Facts. */
+let zxLoading = null;
+function loadZX() {
+  if (window.ZXBarcode) return Promise.resolve();
+  if (!zxLoading) zxLoading = new Promise((res, rej) => {
+    const sc = document.createElement('script'); sc.src = 'vendor/zxing-ean.js';
+    sc.onload = res; sc.onerror = () => { zxLoading = null; rej(new Error('zx-load')); };
+    document.head.appendChild(sc);
+  });
+  return zxLoading;
+}
+const SCAN_ANGLES = [0, 8, -8, 90, 16, -16, -90];
+/* Disegna `src` (video o immagine) su `cv` ruotato di `deg` gradi, ridotto a max `maxSide` px, e prova a leggere un codice.
+   Con `band` usa solo la fascia centrale (60%) dell'inquadratura, a risoluzione piena: più nitido e più veloce. */
+function scanDecode(src, sw, sh, cv, ctx, deg, maxSide, band) {
+  const swap = Math.abs(deg) === 90;
+  let sx = 0, sy = 0, bw = sw, bh = sh;
+  if (band) { if (swap) { bw = sw * 0.6; sx = (sw - bw) / 2; } else { bh = sh * 0.6; sy = (sh - bh) / 2; } }
+  const k = Math.min(1, maxSide / Math.max(bw, bh)), w = Math.max(8, Math.round(bw * k)), h = Math.max(8, Math.round(bh * k));
+  const cw = swap ? h : w, ch = swap ? w : h;
+  cv.width = cw; cv.height = ch;
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cw, ch);
+  ctx.save(); ctx.translate(cw / 2, ch / 2); ctx.rotate(deg * Math.PI / 180); ctx.drawImage(src, sx, sy, bw, bh, -w / 2, -h / 2, w, h); ctx.restore();
+  const d = ctx.getImageData(0, 0, cw, ch).data, g = new Uint8ClampedArray(cw * ch);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+  const code = window.ZXBarcode.decode(g, cw, ch);
+  return code && /^\d{8,14}$/.test(code) ? code : null;
+}
+function scanErrText(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError' || n === 'PermissionDeniedError') return 'Accesso alla fotocamera non consentito. Consentilo quando il telefono lo chiede (se avevi rifiutato, riattivalo dalle Impostazioni) oppure usa «Scatta una foto del codice».';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'Non trovo una fotocamera utilizzabile. Prova «Scatta una foto del codice» o scrivi il numero nella casella di ricerca.';
+  if (n === 'NotReadableError') return 'La fotocamera è in uso da un\'altra app. Chiudila e riprova.';
+  if (e && e.message === 'zx-load') return 'Non riesco a caricare il lettore. Controlla la connessione e riprova.';
+  if (n === 'Unsupported') return 'Questo browser non permette di usare la fotocamera dall\'app. Usa «Scatta una foto del codice» o scrivi il numero.';
+  return 'Non riesco ad avviare la fotocamera. Prova «Scatta una foto del codice» o scrivi il numero nella casella di ricerca.';
+}
+function openScanner(onCode) {
+  let stream = null, stopped = false, timer = 0, k = 0, pend = null, pendAt = 0, busy = false;
+  const sh = openSheet('Scansiona il codice a barre', { onClose: stop });
+  sh.body.innerHTML = `<div class="max"><div class="scan-box"><video class="scan-video" playsinline muted autoplay></video><div class="scan-guide"><i></i></div></div>
+    <p class="scan-msg" aria-live="polite">Avvio della fotocamera…</p>
+    <p class="hint">Avvicina il codice a barre fino a riempire il riquadro, con buona luce e le barre più o meno orizzontali. Si legge da solo.</p>
+    <button class="btn" data-sa="photo" style="margin-top:12px">Scatta una foto del codice</button>
+    <input type="file" class="hidden scan-file" accept="image/*" capture="environment"></div>`;
+  sh.foot.innerHTML = '<button class="btn" data-sa="close">Annulla</button>';
+  const video = $('video', sh.body), msg = $('.scan-msg', sh.body), file = $('.scan-file', sh.body);
+  const cv = document.createElement('canvas'), ctx = cv.getContext('2d', { willReadFrequently: true });
+  function stop() {
+    stopped = true; clearTimeout(timer);
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    try { video.srcObject = null; } catch (e) { }
+  }
+  function found(code) { if (stopped) return; stop(); sh.close(); onCode(code); }
+  function tick() {
+    if (stopped) return;
+    const next = () => { timer = setTimeout(tick, 70); };
+    if (video.readyState < 2 || !video.videoWidth) return next();
+    let code = null;
+    try { code = scanDecode(video, video.videoWidth, video.videoHeight, cv, ctx, SCAN_ANGLES[k++ % SCAN_ANGLES.length], 1280, true); } catch (e) { }
+    if (code) {
+      const now = Date.now();
+      if (code === pend && now - pendAt < 3000) return found(code);
+      pend = code; pendAt = now; msg.textContent = 'Codice letto, conferma…';
+    } else if (pend && Date.now() - pendAt > 3000) { pend = null; msg.textContent = 'Cerco il codice…'; }
+    next();
+  }
+  (async () => {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw { name: 'Unsupported' };
+      const zx = loadZX();
+      const st = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+      if (stopped) { st.getTracks().forEach(t => t.stop()); return; }
+      stream = st; video.srcObject = st;
+      await zx;
+      try { await video.play(); } catch (e) { }
+      if (stopped) return;
+      msg.textContent = 'Cerco il codice…';
+      tick();
+    } catch (e) { if (!stopped) { stop(); stopped = false; msg.textContent = scanErrText(e); msg.classList.add('err'); $('.scan-box', sh.body).classList.add('off'); $('.hint', sh.body).style.display = 'none'; } }
+  })();
+  sh.on({
+    photo: () => { file.value = ''; file.click(); },
+  });
+  file.addEventListener('change', async () => {
+    const f = file.files && file.files[0]; if (!f || busy) return;
+    busy = true; msg.classList.remove('err'); msg.textContent = 'Leggo la foto…';
+    try {
+      await loadZX();
+      const url = URL.createObjectURL(f);
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('img')); i.src = url; });
+      let code = null;
+      for (const side of [1600, 1000]) for (const a of [0, 90, 8, -8, -90, 16, -16]) {
+        code = scanDecode(img, img.naturalWidth, img.naturalHeight, cv, ctx, a, side, false); if (code) break;
+        await new Promise(r => setTimeout(r, 0));
+      }
+      URL.revokeObjectURL(url);
+      if (code) return found(code);
+      msg.classList.add('err'); msg.textContent = 'Non riesco a leggere il codice nella foto. Avvicinati, metti a fuoco e tieni le barre orizzontali, poi riprova.';
+    } catch (e) { msg.classList.add('err'); msg.textContent = scanErrText(e); }
+    busy = false;
+  });
+  return sh;
+}
+
 /* ===================== Selettore alimenti ===================== */
 function openPicker(mealId) {
   const P = { meal: mealId, tab: 'alimenti', cat: 'Tutti', venue: null, dcat: 'Tutti', q: '', dq: '', added: 0, off: { q: '', res: null, busy: false, err: '' } };
@@ -1225,7 +1332,8 @@ function openPicker(mealId) {
         <div class="chips scroll" style="margin-top:10px">${dcats.map(c => `<button class="chip ${P.dcat === c ? 'on' : ''}" data-sa="dcat" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>`;
       $('.p-q', CT).addEventListener('input', e => { P.dq = e.target.value; drawList(); });
     } else if (P.tab === 'online') {
-      CT.innerHTML = `<div style="display:grid;grid-template-columns:1fr auto;gap:8px"><input class="search p-q" type="search" placeholder="Nome del prodotto o codice a barre" enterkeyhint="search" autocomplete="off" autocorrect="off" value="${esc(P.off.q)}"><button class="btn primary" style="width:auto;min-height:52px" data-sa="osearch">Cerca</button></div>`;
+      CT.innerHTML = `<div style="display:grid;grid-template-columns:1fr auto;gap:8px"><input class="search p-q" type="search" placeholder="Nome del prodotto o codice a barre" enterkeyhint="search" autocomplete="off" autocorrect="off" value="${esc(P.off.q)}"><button class="btn primary" style="width:auto;min-height:52px" data-sa="osearch">Cerca</button></div>
+        <button class="btn" style="margin-top:8px" data-sa="scan"><svg viewBox="0 0 24 24" aria-hidden="true" style="width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;margin-right:8px;vertical-align:-5px"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 9v6M12 9v6M16 9v6"/></svg>Scansiona il codice a barre</button>`;
       const inp = $('.p-q', CT);
       inp.addEventListener('input', e => { P.off.q = e.target.value; });
       inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); inp.blur(); doOnline(); } });
@@ -1290,7 +1398,7 @@ function openPicker(mealId) {
       const o = P.off;
       if (o.busy) LS.innerHTML = '<p class="muted" style="padding:18px 2px">Cerco su Open Food Facts…</p>';
       else if (o.err) LS.innerHTML = `<p class="muted" style="padding:18px 2px">${esc(o.err)}</p>`;
-      else if (o.res == null) LS.innerHTML = '<p class="muted" style="padding:18px 2px">Cerca un prodotto confezionato per nome o inserisci il codice a barre. Servono connessione e un po\' di pazienza: i dati sono inseriti dagli utenti, controlla sempre l\'etichetta.</p>';
+      else if (o.res == null) LS.innerHTML = '<p class="muted" style="padding:18px 2px">Cerca un prodotto confezionato per nome, oppure scansiona o scrivi il codice a barre. Servono connessione e un po\' di pazienza: i dati sono inseriti dagli utenti, controlla sempre l\'etichetta.</p>';
       else if (!o.res.length) LS.innerHTML = '<p class="muted" style="padding:18px 2px">Nessun prodotto con valori completi. Prova un altro nome oppure crea l\'alimento a mano dalla scheda Extra.</p>';
       else LS.innerHTML = `<div class="list">${o.res.map((f, i) => `<div class="frow"><button class="main" data-sa="ofood" data-i="${i}"><b>${esc(f.name)}</b><span>Per 100 g: ${f0(f.per.kcal)} kcal · P ${f1(f.per.p)} · C ${f1(f.per.c)} · G ${f1(f.per.f)}</span></button><button class="quick" data-sa="ofood" data-i="${i}" aria-label="Scegli">›</button></div>`).join('')}</div><p class="hint">Fonte: Open Food Facts (dati inseriti dagli utenti, possono contenere errori).</p>`;
     } else {
@@ -1299,10 +1407,14 @@ function openPicker(mealId) {
         ${S.custom.length ? `<div class="group-title" style="margin-top:6px">I miei alimenti</div><div class="list">${S.custom.map(f => foodRow(f)).join('')}</div>` : ''}</div>`;
     }
   }
-  async function doOnline() {
+  async function doOnline(fromScan) {
     const q = P.off.q.trim(); if (q.length < 2) return;
     P.off.busy = true; P.off.err = ''; drawList();
-    try { P.off.res = await offSearch(q); }
+    try {
+      P.off.res = await offSearch(q);
+      if (/^\d{8,14}$/.test(q) && !P.off.res.length) P.off.err = 'Codice ' + q + ': prodotto non trovato su Open Food Facts, oppure senza valori nutrizionali completi. Puoi inserire i valori dall\'etichetta dalla scheda Extra.';
+      else if (fromScan && P.off.res.length === 1) { P.off.busy = false; drawList(); openFood(P.off.res[0]); return; }
+    }
     catch (e) { P.off.res = null; P.off.err = (e && e.name === 'AbortError') ? 'La ricerca ha impiegato troppo tempo. Riprova tra poco.' : 'Non riesco a collegarmi a Open Food Facts. Controlla la connessione e riprova.'; }
     P.off.busy = false; drawList();
   }
@@ -1322,6 +1434,7 @@ function openPicker(mealId) {
     dquick: el => { const x = dishById(el.dataset.id); addItemsTo(P.meal, expandDish(x)); P.added++; foot(); toast('Aggiunto: ' + x.name); },
     saved: el => { const s = S.saved.find(x => x.id === el.dataset.id); if (!s) return; addItemsTo(P.meal, cloneItems(s.items)); P.added++; foot(); toast('Aggiunto: ' + s.name); },
     osearch: () => { $('.p-q', CT).blur(); doOnline(); },
+    scan: () => openScanner(code => { P.off.q = code; drawCtl(); doOnline(true); }),
     ofood: el => { const f = P.off.res[+el.dataset.i]; if (f) openFood(f); },
     custom: () => openCustomForm({ add: P.meal, after: () => { drawList(); } }),
   });
